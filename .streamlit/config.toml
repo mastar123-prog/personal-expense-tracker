@@ -1,0 +1,13 @@
+[theme]
+# Initial values; the app overrides these at runtime from the selected theme.
+base = "dark"
+primaryColor = "#7C9CFF"
+backgroundColor = "#070B1A"
+secondaryBackgroundColor = "#141B3A"
+textColor = "#E6E9F5"
+
+[client]
+toolbarMode = "minimal"
+
+[server]
+runOnSave = true

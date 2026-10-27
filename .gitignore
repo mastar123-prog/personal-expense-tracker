@@ -1,0 +1,22 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# SQLite local databases (keeps user personal financial data private)
+data/*.db
+data/*.db-journal
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Virtual environments
+venv/
+env/
+.env
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
