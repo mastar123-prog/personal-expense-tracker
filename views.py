@@ -62,7 +62,7 @@ def transaction_form(prefix: str, in_dialog: bool = False) -> None:
                                    format="%.2f", value=None, placeholder="0.00",
                                    key=f"{prefix}_amount")
         d = col2.date_input("Date", value=date.today(), key=f"{prefix}_date",
-                            format="MMM DD, YYYY")
+                            format="YYYY-MM-DD")
         col3, col4 = st.columns(2)
         category = col3.selectbox("Category", options, format_func=_cat_label,
                                   key=f"{prefix}_cat_{tx_type}")
@@ -372,7 +372,7 @@ def page_transactions() -> None:
         min_d, max_d = df["date"].min().date(), df["date"].max().date()
         rng = f3.date_input("Date range", value=(max(min_d, max_d - timedelta(days=90)), max_d),
                             min_value=min_d, max_value=max(max_d, date.today()), key="tx_range",
-                            format="MMM DD, YYYY")
+                            format="YYYY-MM-DD")
         f4, f5, f6 = st.columns([2, 1.2, 1.6])
         sel_cats = f4.multiselect("Categories", sorted(df["category"].unique()),
                                   placeholder="All categories", format_func=_cat_label,

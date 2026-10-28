@@ -167,17 +167,18 @@ def init_db() -> None:
         con.execute("CREATE INDEX IF NOT EXISTS idx_tx_user ON transactions(user_id)")
 
         # Seed default Demo user if no users exist
-        demo_user = con.execute("SELECT id FROM users WHERE id = 1").fetchone()
-        if not demo_user:
+        try:
             import auth
             pwd_hash, salt = auth.hash_password("demo123")
             con.execute(
                 """
-                INSERT INTO users (id, username, email, password_hash, salt, full_name, avatar, created_at)
+                INSERT OR IGNORE INTO users (id, username, email, password_hash, salt, full_name, avatar, created_at)
                 VALUES (1, 'demo', 'demo@lumen.app', ?, ?, 'Demo Explorer', '✨', ?)
                 """,
                 (pwd_hash, salt, datetime.now().isoformat(timespec="seconds")),
             )
+        except Exception:
+            pass
 
         # Seed categories for user 1 if missing
         if con.execute("SELECT COUNT(*) FROM categories WHERE user_id = 1").fetchone()[0] == 0:
