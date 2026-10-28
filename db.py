@@ -116,14 +116,16 @@ def init_db() -> None:
                 name TEXT NOT NULL,
                 type TEXT NOT NULL,
                 emoji TEXT DEFAULT '📦',
-                color TEXT DEFAULT '#90A4AE'
+                color TEXT DEFAULT '#90A4AE',
+                UNIQUE(user_id, name)
             );
 
             CREATE TABLE IF NOT EXISTS budgets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER DEFAULT 1,
                 category TEXT NOT NULL,
-                amount REAL NOT NULL
+                amount REAL NOT NULL,
+                UNIQUE(user_id, category)
             );
 
             CREATE TABLE IF NOT EXISTS recurring (
@@ -153,7 +155,8 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER DEFAULT 1,
                 key TEXT NOT NULL,
-                value TEXT
+                value TEXT,
+                UNIQUE(user_id, key)
             );
             """
         )
@@ -163,6 +166,63 @@ def init_db() -> None:
             cols = [r["name"] for r in con.execute(f"PRAGMA table_info({tbl})").fetchall()]
             if "user_id" not in cols:
                 con.execute(f"ALTER TABLE {tbl} ADD COLUMN user_id INTEGER DEFAULT 1")
+
+        # Migrate legacy tables that lack an 'id' primary key or had single-column primary keys (categories, budgets, settings)
+        cat_cols = [r["name"] for r in con.execute("PRAGMA table_info(categories)").fetchall()]
+        if "id" not in cat_cols:
+            con.executescript(
+                """
+                CREATE TABLE categories_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER DEFAULT 1,
+                    name TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    emoji TEXT DEFAULT '📦',
+                    color TEXT DEFAULT '#90A4AE',
+                    UNIQUE(user_id, name)
+                );
+                INSERT OR IGNORE INTO categories_new (user_id, name, type, emoji, color)
+                SELECT COALESCE(user_id, 1), name, type, emoji, color FROM categories;
+                DROP TABLE categories;
+                ALTER TABLE categories_new RENAME TO categories;
+                """
+            )
+
+        budget_cols = [r["name"] for r in con.execute("PRAGMA table_info(budgets)").fetchall()]
+        if "id" not in budget_cols:
+            con.executescript(
+                """
+                CREATE TABLE budgets_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER DEFAULT 1,
+                    category TEXT NOT NULL,
+                    amount REAL NOT NULL,
+                    UNIQUE(user_id, category)
+                );
+                INSERT OR IGNORE INTO budgets_new (user_id, category, amount)
+                SELECT COALESCE(user_id, 1), category, amount FROM budgets;
+                DROP TABLE budgets;
+                ALTER TABLE budgets_new RENAME TO budgets;
+                """
+            )
+
+        settings_cols = [r["name"] for r in con.execute("PRAGMA table_info(settings)").fetchall()]
+        if "id" not in settings_cols:
+            con.executescript(
+                """
+                CREATE TABLE settings_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER DEFAULT 1,
+                    key TEXT NOT NULL,
+                    value TEXT,
+                    UNIQUE(user_id, key)
+                );
+                INSERT OR IGNORE INTO settings_new (user_id, key, value)
+                SELECT COALESCE(user_id, 1), key, value FROM settings;
+                DROP TABLE settings;
+                ALTER TABLE settings_new RENAME TO settings;
+                """
+            )
 
         con.execute("CREATE INDEX IF NOT EXISTS idx_tx_user ON transactions(user_id)")
 
@@ -180,18 +240,19 @@ def init_db() -> None:
         except Exception:
             pass
 
-        # Seed categories for user 1 if missing
-        if con.execute("SELECT COUNT(*) FROM categories WHERE user_id = 1").fetchone()[0] == 0:
-            con.executemany(
-                "INSERT INTO categories(name, type, emoji, color, user_id) VALUES (?,?,?,?, 1)",
-                DEFAULT_CATEGORIES,
-            )
-
-        # Seed settings for user 1 if missing
-        for k, v in DEFAULT_SETTINGS.items():
-            con.execute(
-                "INSERT OR IGNORE INTO settings(key, value, user_id) VALUES (?,?, 1)", (k, v)
-            )
+        # Seed categories & settings for all existing users if missing
+        user_rows = con.execute("SELECT id FROM users").fetchall()
+        for u_row in user_rows:
+            uid = u_row["id"]
+            if con.execute("SELECT COUNT(*) FROM categories WHERE user_id = ?", (uid,)).fetchone()[0] == 0:
+                con.executemany(
+                    "INSERT OR IGNORE INTO categories(name, type, emoji, color, user_id) VALUES (?,?,?,?,?)",
+                    [(*c, uid) for c in DEFAULT_CATEGORIES],
+                )
+            for k, v in DEFAULT_SETTINGS.items():
+                con.execute(
+                    "INSERT OR IGNORE INTO settings(key, value, user_id) VALUES (?,?,?)", (k, v, uid)
+                )
 
 
 # --------------------------------------------------------------------------- settings
@@ -234,11 +295,13 @@ def get_categories(tx_type: str | None = None, user_id: int | None = None) -> pd
     if df.empty:
         # Fallback to default categories if not yet seeded for this user
         with _conn() as con:
-            for cat, t_type, emoji, color in DEFAULT_CATEGORIES:
-                con.execute(
-                    "INSERT INTO categories(name, type, emoji, color, user_id) VALUES (?,?,?,?,?)",
-                    (cat, t_type, emoji, color, uid),
-                )
+            has_any = con.execute("SELECT 1 FROM categories WHERE user_id = ? LIMIT 1", (uid,)).fetchone()
+            if not has_any:
+                for cat, t_type, emoji, color in DEFAULT_CATEGORIES:
+                    con.execute(
+                        "INSERT OR IGNORE INTO categories(name, type, emoji, color, user_id) VALUES (?,?,?,?,?)",
+                        (cat, t_type, emoji, color, uid),
+                    )
             df = pd.read_sql_query(q + " ORDER BY type DESC, name", con, params=params)
     return df
 
@@ -347,7 +410,7 @@ def import_transactions(df: pd.DataFrame, user_id: int | None = None) -> int:
             category = str(row[cols["category"]]).strip() or "Other"
             if category not in known:
                 con.execute(
-                    "INSERT INTO categories(name, type, emoji, color, user_id) VALUES (?,?,?,?,?)",
+                    "INSERT OR IGNORE INTO categories(name, type, emoji, color, user_id) VALUES (?,?,?,?,?)",
                     (category, tx_type, "🏷️", "#90A4AE", uid),
                 )
                 known.add(category)
