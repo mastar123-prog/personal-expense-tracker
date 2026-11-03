@@ -34,14 +34,12 @@ user = auth.get_current_user()
 settings = db.get_settings(user_id=user["id"] if user else 1)
 T = get_theme(settings.get("theme"))
 
-# Push the theme into Streamlit's native config (widgets, menus, data grid).
-if sync_native_theme(T):
-    tries = st.session_state.get("_theme_reruns", 0)
-    if tries < 2:
-        st.session_state["_theme_reruns"] = tries + 1
+# Push the theme into Streamlit's native config only when theme actually changes (prevents double-rerun glitches)
+cur_theme_name = T["name"]
+if st.session_state.get("_last_synced_theme") != cur_theme_name:
+    st.session_state["_last_synced_theme"] = cur_theme_name
+    if sync_native_theme(T):
         st.rerun()
-else:
-    st.session_state["_theme_reruns"] = 0
 
 st.markdown(build_css(T), unsafe_allow_html=True)
 

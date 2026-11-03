@@ -604,6 +604,617 @@ def page_dashboard() -> None:
         greet_title = f"{_greeting()}{', ' + esc(name) if name else ''}"
         sub_title = f"Here's your money story · {date.today():%A, %B %d}"
 
+        # Natural Themed Sparkle Trigger: Zero outline, themed vector star glyph, zero-jitter layout
+        html(f"""
+        <style>
+        div.st-key-sparkle_proxy_trigger {{
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: flex-start !important;
+            padding: 0 !important;
+            margin: 0 !important;
+        }}
+        div.st-key-sparkle_proxy_trigger button,
+        div.st-key-sparkle_proxy_trigger button:hover,
+        div.st-key-sparkle_proxy_trigger button:focus,
+        div.st-key-sparkle_proxy_trigger button:active,
+        div.st-key-sparkle_proxy_trigger button:focus-visible {{
+            background: transparent !important;
+            background-color: transparent !important;
+            border: none !important;
+            border-width: 0 !important;
+            box-shadow: none !important;
+            outline: none !important;
+            padding: 0 4px !important;
+            margin: 0 !important;
+            min-height: unset !important;
+            height: auto !important;
+            line-height: 1 !important;
+            font-size: 1.7rem !important;
+            cursor: pointer !important;
+            background: linear-gradient(135deg, {T['primary']}, {T['accent']}) !important;
+            -webkit-background-clip: text !important;
+            -webkit-text-fill-color: transparent !important;
+            transition: transform 0.2s ease, filter 0.2s ease !important;
+        }}
+        div.st-key-sparkle_proxy_trigger button:hover {{
+            transform: scale(1.2) rotate(12deg) !important;
+            filter: drop-shadow(0 0 6px {T['accent']}) !important;
+        }}
+        div.st-key-sparkle_proxy_trigger div[data-testid="stMarkdownContainer"] p {{
+            font-size: 1.7rem !important;
+            line-height: 1 !important;
+            margin: 0 !important;
+            background: linear-gradient(135deg, {T['primary']}, {T['accent']}) !important;
+            -webkit-background-clip: text !important;
+            -webkit-text-fill-color: transparent !important;
+        }}
+        </style>
+        """)
+
+        c_title, c_star = st.columns([0.9, 0.1], vertical_alignment="center")
+        with c_title:
+            st.markdown(f'<h1 class="lm-hero-title" style="margin:0;padding:0;line-height:1.2;">{greet_title}</h1>', unsafe_allow_html=True)
+        with c_star:
+            if st.button("✦", key="sparkle_proxy_trigger", help="Orbit Portal"):
+                st.session_state["show_proxy_portal"] = True
+                st.rerun()
+
+        st.markdown(f'<div class="lm-hero-sub" style="margin-top:0.25rem;margin-bottom:1.1rem">{sub_title}</div>', unsafe_allow_html=True)
+
+    if df.empty:
+        return df
+    return df[df["date"].dt.to_period("M") == period]
+
+
+def _sum(df: pd.DataFrame, tx_type: str) -> float:
+    if df.empty:
+        return 0.0
+    return float(df.loc[df["type"] == tx_type, "amount"].sum())
+
+
+def apply_theme(name: str) -> None:
+    db.set_setting("theme", name)
+    key = "last_dark_theme" if THEMES[name]["base"] == "dark" else "last_light_theme"
+    db.set_setting(key, name)
+
+
+def _cat_label(name: str) -> str:
+    return f"{ctx()['emoji'].get(name, '🏷️')}  {name}"
+
+
+def _greeting() -> str:
+    h = datetime.now().hour
+    return "Good morning" if h < 12 else "Good afternoon" if h < 18 else "Good evening"
+
+
+# =========================================================================== add form
+def transaction_form(prefix: str, in_dialog: bool = False) -> None:
+    c = ctx()
+    tx_type = st.segmented_control(
+        "Type", ["Expense", "Income"], default="Expense", required=True,
+        key=f"{prefix}_type", format_func=lambda x: ("💸 " if x == "Expense" else "💰 ") + x,
+    ) or "Expense"
+    cats = c["cats"]
+    options = cats.loc[cats["type"] == tx_type, "name"].tolist() or ["Other"]
+
+    with st.form(f"{prefix}_form", clear_on_submit=True, border=not in_dialog):
+        col1, col2 = st.columns(2)
+        amount = col1.number_input(f"Amount ({c['cur_md']})", min_value=0.0, step=1.0,
+                                   format="%.2f", value=None, placeholder="0.00",
+                                   key=f"{prefix}_amount")
+        d = col2.date_input("Date", value=date.today(), key=f"{prefix}_date",
+                            format="YYYY-MM-DD")
+        col3, col4 = st.columns(2)
+        category = col3.selectbox("Category", options, format_func=_cat_label,
+                                  key=f"{prefix}_cat_{tx_type}")
+        pm = col4.selectbox("Payment method", db.PAYMENT_METHODS, key=f"{prefix}_pm")
+        desc = st.text_input("Description", placeholder="e.g. Dinner at Luigi's",
+                             key=f"{prefix}_desc", max_chars=120)
+        tags = st.text_input("Tags (optional, comma separated)", placeholder="work, trip",
+                             key=f"{prefix}_tags")
+        submitted = st.form_submit_button(f"Add {tx_type.lower()}", type="primary",
+                                          icon=":material/add:", width="stretch")
+    if submitted:
+        if not amount or amount <= 0:
+            st.error("Please enter an amount greater than zero.")
+            return
+        db.add_transaction(d, tx_type, category, amount, desc, pm, tags)
+        st.toast(f"{tx_type} of {money_md(amount)} added to **{category}**",
+                 icon="✅" if tx_type == "Expense" else "🎉")
+        if in_dialog:
+            st.rerun()
+
+
+@st.dialog("Quick add", width="medium", icon=":material/bolt:")
+def quick_add_dialog() -> None:
+    transaction_form("qa", in_dialog=True)
+
+
+@st.dialog("Edit transaction", width="medium", icon=":material/edit:")
+def edit_dialog(row: dict) -> None:
+    c = ctx()
+    tx_type = st.segmented_control("Type", ["Expense", "Income"], default=row["type"],
+                                   required=True, key="ed_type") or row["type"]
+    options = c["cats"].loc[c["cats"]["type"] == tx_type, "name"].tolist()
+    if row["category"] not in options:
+        options = [row["category"]] + options
+    with st.form("edit_form", border=False):
+        col1, col2 = st.columns(2)
+        amount = col1.number_input("Amount", min_value=0.0, value=float(row["amount"]),
+                                   step=1.0, format="%.2f")
+        d = col2.date_input("Date", value=pd.Timestamp(row["date"]).date())
+        col3, col4 = st.columns(2)
+        category = col3.selectbox("Category", options, index=options.index(row["category"]),
+                                  format_func=_cat_label)
+        pm_opts = db.PAYMENT_METHODS
+        pm = col4.selectbox("Payment method", pm_opts,
+                            index=pm_opts.index(row["payment_method"])
+                            if row["payment_method"] in pm_opts else 0)
+        desc = st.text_input("Description", value=row["description"])
+        tags = st.text_input("Tags", value=row["tags"])
+        if st.form_submit_button("Save changes", type="primary", width="stretch"):
+            db.update_transaction(row["id"], date=d, type=tx_type, category=category,
+                                  amount=amount, description=desc, payment_method=pm, tags=tags)
+            st.toast("Transaction updated", icon="✏️")
+            st.rerun()
+
+
+# =========================================================================== dashboard
+def _insights(m_df, p_df, budget_total, period, is_current, days_elapsed, days_in_month):
+    cur_exp = m_df[m_df["type"] == "Expense"]
+    prev_exp = p_df[p_df["type"] == "Expense"]
+    spent, prev_spent = cur_exp["amount"].sum(), prev_exp["amount"].sum()
+    income = _sum(m_df, "Income")
+    items = []
+    if cur_exp.empty:
+        return [("🌱", "No expenses recorded for this month yet — a clean slate!")]
+
+    by_cat = cur_exp.groupby("category")["amount"].sum().sort_values(ascending=False)
+    top_cat, top_val = by_cat.index[0], by_cat.iloc[0]
+    items.append(("🏆", f"<b>{esc(top_cat)}</b> is your biggest spend at <b>{money(top_val)}</b> "
+                        f"({top_val / spent * 100:.0f}% of expenses)."))
+
+    if prev_spent > 0 and not is_current:
+        diff = (spent - prev_spent) / prev_spent * 100
+        word = "more" if diff > 0 else "less"
+        items.append(("📊" if diff > 0 else "👏",
+                      f"You spent <b>{abs(diff):.0f}% {word}</b> than the previous month."))
+    if not prev_exp.empty:
+        prev_cat = prev_exp.groupby("category")["amount"].sum()
+        jumps = (by_cat - prev_cat.reindex(by_cat.index).fillna(0)).sort_values(ascending=False)
+        if len(jumps) and jumps.iloc[0] > max(30, 0.1 * spent):
+            items.append(("📈", f"<b>{esc(jumps.index[0])}</b> is up <b>{money(jumps.iloc[0])}</b> "
+                                "compared to last month."))
+
+    if is_current and days_elapsed > 0:
+        projected = spent / days_elapsed * days_in_month
+        if budget_total:
+            if projected > budget_total:
+                items.append(("⚠️", f"At this pace you'll spend <b>{money(projected)}</b> — "
+                                    f"<b>{money(projected - budget_total)}</b> over budget."))
+            else:
+                items.append(("✅", f"On track! Projected spend <b>{money(projected)}</b> "
+                                    f"stays within your {money(budget_total)} budget."))
+        else:
+            items.append(("🔮", f"Projected month-end spend: <b>{money(projected)}</b>."))
+
+    spend_days = set(cur_exp["date"].dt.day)
+    no_spend = max(0, days_elapsed - len([d for d in spend_days if d <= days_elapsed]))
+    if no_spend:
+        items.append(("🧘", f"<b>{no_spend}</b> no-spend day{'s' if no_spend != 1 else ''} "
+                            "this month. Nice discipline!"))
+    if income > 0:
+        rate = (income - spent) / income * 100
+        if rate >= 20:
+            items.append(("💎", f"You're saving <b>{rate:.0f}%</b> of your income. Excellent!"))
+        elif rate < 0:
+            items.append(("🚨", "Expenses exceed income this month — time to review."))
+    big = cur_exp.nlargest(1, "amount").iloc[0]
+    items.append(("🧾", f"Largest purchase: <b>{esc(big['description'] or big['category'])}</b> "
+                        f"for <b>{money(big['amount'])}</b> on {big['date']:%b %d}."))
+    return items[:6]
+
+
+# =========================================================================== reports & sharing
+def generate_report_text(df: pd.DataFrame, title: str, user_name: str = "", currency: str = "$") -> str:
+    """Generate clean plain text summary of an expense report for WhatsApp, Email, or clipboard."""
+    lines = []
+    lines.append("📊 LUMEN FINANCIAL REPORT")
+    lines.append(f"📌 {title}")
+    if user_name:
+        lines.append(f"👤 Prepared for: {user_name}")
+    lines.append(f"📅 Date: {datetime.now().strftime('%b %d, %Y')}")
+    lines.append("────────────────────────")
+
+    if df.empty:
+        lines.append("No transactions recorded for this period.")
+        lines.append("────────────────────────")
+        lines.append("✨ Generated with Lumen Personal Expense Tracker")
+        return "\n".join(lines)
+
+    inc_df = df[df["type"] == "Income"]
+    exp_df = df[df["type"] == "Expense"]
+    tot_inc = float(inc_df["amount"].sum()) if not inc_df.empty else 0.0
+    tot_exp = float(exp_df["amount"].sum()) if not exp_df.empty else 0.0
+    net = tot_inc - tot_exp
+    rate = (net / tot_inc * 100) if tot_inc > 0 else 0.0
+
+    lines.append(f"💰 Total Income:   {currency}{tot_inc:,.2f}")
+    lines.append(f"💸 Total Expenses: {currency}{tot_exp:,.2f}")
+    sign = "+" if net >= 0 else "-"
+    lines.append(f"⚖️ Net Savings:    {sign}{currency}{abs(net):,.2f} ({rate:.0f}% savings rate)")
+    lines.append(f"🧾 Transactions:   {len(df):,}")
+    lines.append("────────────────────────")
+
+    if not exp_df.empty:
+        lines.append("🏷️ TOP CATEGORIES:")
+        cat_group = exp_df.groupby("category")["amount"].sum().sort_values(ascending=False)
+        for cat, amt in cat_group.head(5).items():
+            pct = (amt / tot_exp * 100) if tot_exp > 0 else 0
+            lines.append(f" • {cat}: {currency}{amt:,.2f} ({pct:.0f}%)")
+        lines.append("────────────────────────")
+
+        lines.append("🧾 TOP EXPENSES:")
+        top_tx = exp_df.nlargest(3, "amount")
+        for _, r in top_tx.iterrows():
+            d_str = r["date"].strftime("%b %d") if hasattr(r["date"], "strftime") else str(r["date"])[:10]
+            desc = r["description"] or r["category"]
+            lines.append(f" • {desc} ({r['category']}): {currency}{r['amount']:,.2f} on {d_str}")
+        lines.append("────────────────────────")
+
+    lines.append("✨ Generated with Lumen Personal Expense Tracker")
+    return "\n".join(lines)
+
+
+def send_report_email_smtp(
+    to_email: str,
+    subject: str,
+    body_text: str,
+    attachment_bytes: bytes | None = None,
+    attachment_filename: str = "report.pdf",
+) -> tuple[bool, str]:
+    """Send report email with optional PDF attachment via configured SMTP server."""
+    clean_email = to_email.strip().lower()
+    settings = db.get_settings(user_id=1)
+    smtp_host = settings.get("smtp_host", "").strip()
+    smtp_port = int(settings.get("smtp_port", 587) or 587)
+    smtp_user = settings.get("smtp_user", "").strip()
+    smtp_pass = settings.get("smtp_pass", "").strip()
+    smtp_sender = settings.get("smtp_sender", "").strip() or smtp_user or "lumen-app@noreply.com"
+    use_ssl = str(settings.get("smtp_ssl", "false")).lower() in ("true", "1", "yes")
+
+    if not (smtp_host and smtp_user and smtp_pass):
+        return False, "SMTP is not configured yet. Configure SMTP in Settings > Email & SMTP."
+
+    try:
+        msg = MIMEMultipart()
+        msg["Subject"] = subject
+        msg["From"] = smtp_sender
+        msg["To"] = clean_email
+        msg.attach(MIMEText(body_text, "plain"))
+
+        if attachment_bytes:
+            part = MIMEApplication(attachment_bytes, Name=attachment_filename)
+            part["Content-Disposition"] = f'attachment; filename="{attachment_filename}"'
+            msg.attach(part)
+
+        if use_ssl or smtp_port == 465:
+            server = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=12)
+        else:
+            server = smtplib.SMTP(smtp_host, smtp_port, timeout=12)
+            server.starttls()
+        server.login(smtp_user, smtp_pass)
+        server.sendmail(smtp_sender, [clean_email], msg.as_string())
+        server.quit()
+        return True, f"Report successfully emailed to {clean_email}!"
+    except Exception as e:
+        return False, f"Failed to send email: {e}"
+
+
+@st.dialog("📤 Share & Export Report", width="large")
+def share_report_dialog(initial_df: pd.DataFrame | None = None, default_title: str = "Expense Report") -> None:
+    c = ctx()
+    cur = c["cur"]
+    all_df = db.get_transactions()
+    user_name = c["settings"].get("user_name") or "User"
+    user = st.session_state.get("user", {})
+    if user:
+        user_name = user.get("full_name") or user.get("username", user_name)
+
+    if all_df.empty:
+        st.info("No transactions available to generate a report.")
+        return
+
+    c1, c2 = st.columns([1.5, 1])
+    is_single_day = initial_df is not None and not initial_df.empty and len(initial_df["date"].dt.date.unique()) == 1
+    scope = c1.selectbox(
+        "Report Period",
+        ["Selected Day", "This Month", "Last 30 Days", "Year to Date (YTD)", "All Time", "Custom Range"],
+        index=0 if is_single_day else 1,
+    )
+
+    today = date.today()
+    if scope == "Selected Day":
+        picked_date = c2.date_input("Date", value=st.session_state.get("selected_day", today))
+        filtered = all_df[all_df["date"].dt.date == picked_date]
+        title = f"Daily Report ({picked_date.strftime('%b %d, %Y')})"
+    elif scope == "This Month":
+        current_period = pd.Period(today, "M")
+        filtered = all_df[all_df["date"].dt.to_period("M") == current_period]
+        title = f"Monthly Report - {today.strftime('%B %Y')}"
+    elif scope == "Last 30 Days":
+        start_d = today - timedelta(days=30)
+        filtered = all_df[all_df["date"].dt.date >= start_d]
+        title = f"30-Day Expense Report ({start_d:%b %d} - {today:%b %d, %Y})"
+    elif scope == "Year to Date (YTD)":
+        start_d = date(today.year, 1, 1)
+        filtered = all_df[all_df["date"].dt.date >= start_d]
+        title = f"YTD Report ({today.year})"
+    elif scope == "All Time":
+        filtered = all_df
+        title = "All-Time Financial Report"
+    else:
+        min_d = all_df["date"].min().date()
+        max_d = all_df["date"].max().date()
+        rng = c2.date_input("Custom Range", value=(max(min_d, today - timedelta(days=30)), today), min_value=min_d, max_value=today)
+        if isinstance(rng, (tuple, list)) and len(rng) == 2:
+            filtered = all_df[(all_df["date"].dt.date >= rng[0]) & (all_df["date"].dt.date <= rng[1])]
+            title = f"Expense Report ({rng[0]:%b %d, %Y} - {rng[1]:%b %d, %Y})"
+        else:
+            filtered = all_df
+            title = "Custom Expense Report"
+
+    report_text = generate_report_text(filtered, title, user_name, cur)
+
+    tab_whatsapp, tab_email, tab_pdf, tab_text = st.tabs([
+        "📱  WhatsApp", "📧  Email", "📄  Download PDF", "📋  Copy Text"
+    ])
+
+    with tab_whatsapp:
+        st.markdown("**Share directly to WhatsApp:**")
+        encoded_wa = urllib.parse.quote(report_text)
+        wa_url = f"https://api.whatsapp.com/send?text={encoded_wa}"
+        st.markdown(
+            f"""
+            <div style="padding:1rem;border-radius:12px;background:rgba(37,211,102,0.12);border:1px solid rgba(37,211,102,0.3);margin-bottom:1rem;">
+              <div style="font-weight:700;color:#25D366;font-size:1.05rem;margin-bottom:.3rem;">🚀 Ready to share on WhatsApp</div>
+              <div class="lm-muted" style="font-size:.85rem;margin-bottom:.8rem;">Clicking below opens WhatsApp with your complete financial breakdown pre-filled. Send it to family, accountant, or yourself in 1 tap!</div>
+              <a href="{wa_url}" target="_blank" style="display:inline-flex;align-items:center;gap:.5rem;background:#25D366;color:#ffffff;font-weight:700;padding:.6rem 1.3rem;border-radius:10px;text-decoration:none;font-size:.92rem;box-shadow:0 4px 12px rgba(37,211,102,0.3);">
+                <span>📱 Open WhatsApp & Send Report</span>
+              </a>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with tab_email:
+        st.markdown("**Share via Email:**")
+        subject = f"📊 Lumen Financial Report - {title}"
+        encoded_subj = urllib.parse.quote(subject)
+        encoded_body = urllib.parse.quote(report_text)
+        mailto_url = f"mailto:?subject={encoded_subj}&body={encoded_body}"
+
+        st.markdown(
+            f"""
+            <div style="padding:1rem;border-radius:12px;background:rgba(124,156,255,0.12);border:1px solid rgba(124,156,255,0.3);margin-bottom:1rem;">
+              <div style="font-weight:700;color:#7C9CFF;font-size:1.05rem;margin-bottom:.3rem;">✉️ Open in Default Mail Client</div>
+              <div class="lm-muted" style="font-size:.85rem;margin-bottom:.8rem;">Opens your default email client (Outlook, Gmail, Apple Mail) with the subject and body ready to send.</div>
+              <a href="{mailto_url}" target="_blank" style="display:inline-flex;align-items:center;gap:.5rem;background:#7C9CFF;color:#070B1A;font-weight:700;padding:.6rem 1.3rem;border-radius:10px;text-decoration:none;font-size:.92rem;">
+                <span>📧 Open Default Mail Client</span>
+              </a>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("**— or send directly via in-app SMTP —**")
+        with st.form("send_email_report_form", border=True):
+            recip = st.text_input("Recipient Email", placeholder="e.g. accountant@firm.com or you@email.com")
+            attach_pdf = st.checkbox("Attach PDF report to email", value=True)
+            if st.form_submit_button("Send Email Report", type="primary", icon=":material/send:", width="stretch"):
+                if not recip or "@" not in recip:
+                    st.error("Please enter a valid recipient email address.")
+                else:
+                    pdf_data = pdf_export.generate_expense_pdf(filtered, title=title, user_name=user_name, currency=cur) if attach_pdf else None
+                    ok, msg = send_report_email_smtp(recip, subject, report_text, pdf_data, f"lumen_{today}.pdf")
+                    if ok:
+                        st.toast(msg, icon="📧")
+                    else:
+                        st.error(msg)
+
+    with tab_pdf:
+        st.markdown("**Generate and Download Official PDF Report:**")
+        pdf_bytes = pdf_export.generate_expense_pdf(
+            filtered,
+            title=title,
+            subtitle=f"Generated on {today:%B %d, %Y}",
+            user_name=user_name,
+            currency=cur,
+        )
+        st.download_button(
+            "📥 Download PDF Report",
+            data=pdf_bytes,
+            file_name=f"lumen_report_{title.lower().replace(' ', '_').replace('-', '_')}.pdf",
+            mime="application/pdf",
+            type="primary",
+            icon=":material/download:",
+            width="stretch",
+        )
+        st.caption("Includes executive summary KPI cards, category breakdown table, and complete transaction ledger.")
+
+    with tab_text:
+        st.text_area("Plain Text Report Summary", value=report_text, height=240)
+
+
+def _render_daily_view(df: pd.DataFrame) -> None:
+    """Daily Expenses calendar explorer view."""
+    c = ctx()
+    T = c["T"]
+    cur = c["cur"]
+
+    if "selected_day" not in st.session_state:
+        st.session_state["selected_day"] = date.today()
+
+    cur_day = st.session_state["selected_day"]
+
+    # Date navigation bar
+    nav1, nav2, nav3, nav4, nav5 = st.columns([1, 1, 1, 1.8, 1.5], vertical_alignment="center")
+    if nav1.button("◀ Previous Day", width="stretch", key="cal_prev_day"):
+        st.session_state["selected_day"] = cur_day - timedelta(days=1)
+        st.rerun()
+    if nav2.button("📅 Today", width="stretch", key="cal_today"):
+        st.session_state["selected_day"] = date.today()
+        st.rerun()
+    if nav3.button("Next Day ▶", width="stretch", key="cal_next_day"):
+        st.session_state["selected_day"] = cur_day + timedelta(days=1)
+        st.rerun()
+
+    picked = nav4.date_input(
+        "Choose Date from Calendar",
+        value=cur_day,
+        key="cal_direct_picker",
+        label_visibility="collapsed",
+    )
+    if picked != cur_day:
+        st.session_state["selected_day"] = picked
+        st.rerun()
+
+    if nav5.button("📤 Share / Export Day", icon=":material/share:", width="stretch", key="cal_share_btn"):
+        day_sub = df[df["date"].dt.date == cur_day] if not df.empty else df
+        share_report_dialog(day_sub, f"Daily Report - {cur_day:%A, %b %d, %Y}")
+
+    st.write("")
+
+    day_df = df[df["date"].dt.date == cur_day] if not df.empty else pd.DataFrame()
+    day_exp = float(day_df[day_df["type"] == "Expense"]["amount"].sum()) if not day_df.empty else 0.0
+    day_inc = float(day_df[day_df["type"] == "Income"]["amount"].sum()) if not day_df.empty else 0.0
+    day_net = day_inc - day_exp
+    tx_count = len(day_df)
+
+    is_today = cur_day == date.today()
+    badge_text = "TODAY" if is_today else f"{cur_day:%A}"
+    html(f"""
+    <div style="display:flex;align-items:center;gap:.6rem;margin-bottom:1rem">
+      <span class="lm-chip {'good' if is_today else 'neutral'}" style="font-size:.85rem;padding:.2rem .6rem">{badge_text}</span>
+      <h2 style="margin:0;font-size:1.45rem;font-weight:700">{cur_day:%A, %B %d, %Y}</h2>
+    </div>
+    """)
+
+    kpi_row([
+        kpi_card("Day Expenses", money(day_exp), "💸", T["expense"], f"{len(day_df[day_df['type'] == 'Expense']) if not day_df.empty else 0} expense(s)"),
+        kpi_card("Day Income", money(day_inc), "💰", T["income"], f"{len(day_df[day_df['type'] == 'Income']) if not day_df.empty else 0} income(s)", 0.06),
+        kpi_card("Day Net Cashflow", money(day_net), "⚖️", T["income"] if day_net >= 0 else T["expense"], "income − expenses", 0.12),
+        kpi_card("Transactions Logged", f"{tx_count}", "🧾", T["primary"], "items on this date", 0.18),
+    ])
+
+    l_col, r_col = st.columns([1.55, 1], gap="large")
+
+    with l_col:
+        section(f"🧾 Activity on {cur_day:%b %d}")
+        if day_df.empty:
+            empty_state("🌱", f"No expenses or income on {cur_day:%B %d}",
+                        "A pristine day! You can add a transaction for this date on the right.")
+        else:
+            exp_day = day_df[day_df["type"] == "Expense"]
+            if not exp_day.empty and len(exp_day["category"].unique()) > 1:
+                cat_sum = exp_day.groupby("category")["amount"].sum().sort_values(ascending=False)
+                donut(cat_sum.index.tolist(), cat_sum.values.tolist(),
+                      [c["cmap"].get(k, T["primary"]) for k in cat_sum.index],
+                      "Spent Today", money(cat_sum.sum(), decimals=0), key=f"day_donut_{cur_day}", height=280)
+
+            for _, r in day_df.iterrows():
+                is_inc = r["type"] == "Income"
+                amt_str = ("+" if is_inc else "−") + money(r["amount"])
+                color = c["cmap"].get(r["category"], T["primary"])
+                emoji = c["emoji"].get(r["category"], "🏷️")
+                tags_str = f" · tags: {esc(r['tags'])}" if r.get("tags") else ""
+                with st.container(border=True):
+                    c_info, c_action = st.columns([4.5, 1.2], vertical_alignment="center")
+                    with c_info:
+                        html(f"""
+                        <div class="lm-tx" style="border:none;padding:0">
+                          <div class="lm-tx-icon" style="background:{hex_to_rgba(color, 0.18)}">{emoji}</div>
+                          <div class="lm-tx-main">
+                            <div class="lm-tx-title">{esc(r["description"] or r["category"])}</div>
+                            <div class="lm-tx-sub">{esc(r["category"])} · {esc(r["payment_method"])}{tags_str}</div>
+                          </div>
+                          <div class="lm-tx-amt lm-num {'inc' if is_inc else 'exp'}">{amt_str}</div>
+                        </div>""")
+                    with c_action:
+                        e_col, d_col = st.columns(2)
+                        if e_col.button("", key=f"d_ed_{r['id']}", icon=":material/edit:", help="Edit"):
+                            edit_dialog(r.to_dict())
+                        if d_col.button("", key=f"d_del_{r['id']}", icon=":material/delete:", help="Delete"):
+                            db.delete_transactions([r["id"]])
+                            st.toast("Transaction deleted", icon="🗑️")
+                            st.rerun()
+
+    with r_col:
+        section("➕ Add to this date")
+        with st.form("day_quick_add", clear_on_submit=True, border=True):
+            st.caption(f"Logging transaction for: **{cur_day:%A, %B %d, %Y}**")
+            tx_type = st.segmented_control(
+                "Type", ["Expense", "Income"], default="Expense", required=True,
+                key="d_qa_type", format_func=lambda x: ("💸 " if x == "Expense" else "💰 ") + x
+            ) or "Expense"
+            cats = c["cats"]
+            opts = cats.loc[cats["type"] == tx_type, "name"].tolist() or ["Other"]
+            qa_amt = st.number_input(f"Amount ({c['cur_md']})", min_value=0.0, step=1.0, format="%.2f", placeholder="0.00", key="d_qa_amt")
+            qa_cat = st.selectbox("Category", opts, format_func=_cat_label, key=f"d_qa_cat_{tx_type}")
+            qa_pm = st.selectbox("Payment method", db.PAYMENT_METHODS, key="d_qa_pm")
+            qa_desc = st.text_input("Description", placeholder="e.g. Lunch with team", key="d_qa_desc", max_chars=120)
+            qa_tags = st.text_input("Tags (optional)", placeholder="work, dining", key="d_qa_tags")
+            if st.form_submit_button(f"Add {tx_type.lower()}", type="primary", icon=":material/add:", width="stretch"):
+                if qa_amt and qa_amt > 0:
+                    db.add_transaction(cur_day, tx_type, qa_cat, qa_amt, qa_desc, qa_pm, qa_tags)
+                    st.toast(f"{tx_type} of {money_md(qa_amt)} logged for {cur_day:%b %d}", icon="✅")
+                    st.rerun()
+                else:
+                    st.error("Please enter a valid amount.")
+
+        if not df.empty:
+            section(f"📅 Daily spend in {cur_day:%B %Y}")
+            m_start = date(cur_day.year, cur_day.month, 1)
+            days_in_m = calendar.monthrange(cur_day.year, cur_day.month)[1]
+            m_end = date(cur_day.year, cur_day.month, days_in_m)
+            m_exp = df[(df["type"] == "Expense") & (df["date"].dt.date >= m_start) & (df["date"].dt.date <= m_end)]
+            if not m_exp.empty:
+                daily_s = m_exp.groupby(m_exp["date"].dt.day)["amount"].sum().reindex(range(1, days_in_m + 1), fill_value=0)
+                colors = [T["accent"] if d == cur_day.day else hex_to_rgba(T["primary"], 0.45) for d in range(1, days_in_m + 1)]
+                fig = go.Figure(go.Bar(
+                    x=list(range(1, days_in_m + 1)),
+                    y=daily_s.values,
+                    marker_color=colors,
+                    marker_line_width=0,
+                    hovertemplate=f"{cur_day:%b} %{{x}}: {cur}%{{y:,.2f}}<extra></extra>",
+                ))
+                fig.update_xaxes(title=None, dtick=5)
+                fig.update_yaxes(title=None, tickprefix=cur)
+                show_chart(fig, key=f"month_daily_bars_{cur_day.month}_{cur_day.year}", height=220)
+
+
+def page_dashboard() -> None:
+    # Handle secret proxy suite launch via query param or session state
+    if st.query_params.get("proxy") == "1" or st.session_state.get("show_proxy_portal"):
+        st.query_params.clear()
+        st.session_state["show_proxy_portal"] = True
+
+    if st.session_state.get("show_proxy_portal"):
+        import proxy_portal
+        proxy_portal.render_proxy_portal()
+        return
+
+    c = ctx()
+    T = c["T"]
+    df = db.get_transactions()
+    name = c["settings"].get("user_name") or ""
+
+    top_l, top_r = st.columns([2.5, 1.7], vertical_alignment="bottom")
+    with top_l:
+        greet_title = f"{_greeting()}{', ' + esc(name) if name else ''}"
+        sub_title = f"Here's your money story · {date.today():%A, %B %d}"
+
         # Natural Themed Sparkle Trigger: 100% working button, zero outline, themed star glyph
         html(f"""
         <style>

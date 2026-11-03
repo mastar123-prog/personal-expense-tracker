@@ -145,47 +145,52 @@ def render_proxy_portal() -> None:
 
         # Quick preset buttons
         preset_cols = st.columns(5)
+        def _set_preset(u: str) -> None:
+            st.session_state["proxy_target_url"] = u
+            st.session_state["proxy_active_url"] = u
+            st.session_state["proxy_input_val"] = u
+            st.rerun()
+
         if preset_cols[0].button("Dyndns Blog", width="stretch", key="ps_dyndns"):
-            st.session_state["proxy_target_url"] = "https://blog.free-dyndns.org/"
-            st.session_state["proxy_active_url"] = "https://blog.free-dyndns.org/"
-            st.rerun()
+            _set_preset("https://blog.free-dyndns.org/")
         if preset_cols[1].button("Wikipedia", width="stretch", key="ps_wiki"):
-            st.session_state["proxy_target_url"] = "https://en.wikipedia.org/wiki/Main_Page"
-            st.session_state["proxy_active_url"] = "https://en.wikipedia.org/wiki/Main_Page"
-            st.rerun()
+            _set_preset("https://en.wikipedia.org/wiki/Main_Page")
         if preset_cols[2].button("Hacker News", width="stretch", key="ps_hn"):
-            st.session_state["proxy_target_url"] = "https://news.ycombinator.com"
-            st.session_state["proxy_active_url"] = "https://news.ycombinator.com"
-            st.rerun()
+            _set_preset("https://news.ycombinator.com")
         if preset_cols[3].button("DuckDuckGo", width="stretch", key="ps_ddg"):
-            st.session_state["proxy_target_url"] = "https://html.duckduckgo.com/html/"
-            st.session_state["proxy_active_url"] = "https://html.duckduckgo.com/html/"
-            st.rerun()
+            _set_preset("https://html.duckduckgo.com/html/")
         if preset_cols[4].button("World News", width="stretch", key="ps_news"):
-            st.session_state["proxy_target_url"] = "https://lite.cnn.com"
-            st.session_state["proxy_active_url"] = "https://lite.cnn.com"
-            st.rerun()
+            _set_preset("https://lite.cnn.com")
 
-        u_col1, u_col2, u_col3 = st.columns([3.2, 1.4, 0.9], vertical_alignment="bottom")
         default_target = st.session_state.get("proxy_target_url", "https://blog.free-dyndns.org/")
-        url_input = u_col1.text_input(
-            "Target Website URL",
-            value=st.session_state.get("proxy_active_url", default_target),
-            placeholder="e.g. https://blog.free-dyndns.org/",
-            key="proxy_url_input",
-        )
+        active_current = st.session_state.get("proxy_active_url", default_target)
+        if "proxy_input_val" not in st.session_state:
+            st.session_state["proxy_input_val"] = active_current
 
-        modes = [
-            "⚡ Smart Web Proxy (Bypasses Frame & Header Blocks)",
-            "📖 Universal Web Reader (Bypasses 100% of Iframe Blocks)",
-            "🛡️ Multi-Proxy Mirror Launcher",
-        ]
-        mode = u_col2.selectbox("Proxy Engine", modes, index=0, key="proxy_mode_sel")
+        with st.form("proxy_nav_bar_form", border=False):
+            u_col1, u_col2, u_col3 = st.columns([3.2, 1.4, 0.9], vertical_alignment="bottom")
+            url_input = u_col1.text_input(
+                "Target Website URL",
+                value=st.session_state["proxy_input_val"],
+                placeholder="e.g. https://blog.free-dyndns.org/",
+                key="proxy_url_input_box",
+            )
+            modes = [
+                "⚡ Smart Web Proxy (Bypasses Frame & Header Blocks)",
+                "📖 Universal Web Reader (Bypasses 100% of Iframe Blocks)",
+                "🛡️ Multi-Proxy Mirror Launcher",
+            ]
+            mode = u_col2.selectbox("Proxy Engine", modes, index=0, key="proxy_mode_sel")
+            browse_clicked = u_col3.form_submit_button("🚀 Go", type="primary", width="stretch")
 
-        browse_clicked = u_col3.button("🚀 Go", type="primary", width="stretch", key="proxy_go_btn")
-        if browse_clicked or (url_input and url_input != st.session_state.get("proxy_active_url")):
-            st.session_state["proxy_target_url"] = url_input
-            st.session_state["proxy_active_url"] = url_input
+            if browse_clicked and url_input.strip():
+                clean_target = url_input.strip()
+                if not clean_target.startswith(("http://", "https://")):
+                    clean_target = "https://" + clean_target
+                st.session_state["proxy_target_url"] = clean_target
+                st.session_state["proxy_active_url"] = clean_target
+                st.session_state["proxy_input_val"] = clean_target
+                st.rerun()
 
         active_url = st.session_state.get("proxy_active_url", default_target).strip()
         if not active_url.startswith(("http://", "https://")):
