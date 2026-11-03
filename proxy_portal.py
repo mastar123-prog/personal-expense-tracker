@@ -176,9 +176,9 @@ def render_proxy_portal() -> None:
         )
 
         modes = [
-            "⚡ Smart Proxy (Bypasses Frame Blocks)",
-            "🌐 Web Gateway (AllOrigins CORS Proxy)",
-            "🖼️ Direct Sandbox Frame",
+            "⚡ Smart Web Proxy (Bypasses Frame & Header Blocks)",
+            "📖 Universal Web Reader (Bypasses 100% of Iframe Blocks)",
+            "🛡️ Multi-Proxy Mirror Launcher",
         ]
         mode = u_col2.selectbox("Proxy Engine", modes, index=0, key="proxy_mode_sel")
 
@@ -192,7 +192,7 @@ def render_proxy_portal() -> None:
             active_url = "https://" + active_url
 
         # Proxy toolbar & unblock mirrors
-        t_col1, t_col2 = st.columns([3, 2], vertical_alignment="center")
+        t_col1, t_col2 = st.columns([2.5, 2.5], vertical_alignment="center")
         with t_col1:
             st.markdown(
                 f"""
@@ -203,36 +203,33 @@ def render_proxy_portal() -> None:
                 unsafe_allow_html=True,
             )
         with t_col2:
-            m1, m2, m3 = st.columns(3)
+            m1, m2, m3, m4 = st.columns(4)
             with m1:
-                st.link_button("↗ Open Tab", active_url, width="stretch", help="Open directly in a new browser tab")
+                st.link_button("↗ Popout", active_url, width="stretch", help="Open directly in a new browser tab")
             with m2:
-                st.link_button("🛡️ 12ft Bypass", f"https://12ft.io/{active_url}", width="stretch", help="Unblock with 12ft ladder")
+                st.link_button("🛡️ 12ft", f"https://12ft.io/{active_url}", width="stretch", help="Unblock with 12ft ladder")
             with m3:
                 st.link_button("📚 Archive", f"https://web.archive.org/web/{active_url}", width="stretch", help="Open Wayback Machine mirror")
+            with m4:
+                st.link_button("⚡ Textify", f"https://txtify.it/{active_url}", width="stretch", help="Lightweight unblocked text mirror")
 
-        # Callout explaining why "refused to connect" happens in direct frames
-        st.markdown(
-            f"""
-            <div style="background:{hex_to_rgba(T['primary'], 0.08)};border-left:3px solid {T['primary']};border-radius:6px;padding:.45rem .8rem;margin:.4rem 0 .9rem;font-size:.78rem;color:{T['muted']};line-height:1.4;">
-              💡 <b>Why do some sites refuse to connect?</b> Sites like Google, YouTube, and DynDNS send <code>X-Frame-Options</code> to block embedding. 
-              Leave this set to <b>⚡ Smart Proxy</b> or <b>🌐 Web Gateway</b> to strip those restrictions!
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        if mode == "⚡ Smart Proxy (Bypasses Frame Blocks)":
-            with st.spinner(f"Unblocking and loading {active_url}..."):
+        if mode == "⚡ Smart Web Proxy (Bypasses Frame & Header Blocks)":
+            with st.spinner(f"Unblocking and streaming {active_url}..."):
                 try:
+                    import urllib3
+                    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
                     headers = {
                         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
                         "Accept-Language": "en-US,en;q=0.9",
                     }
-                    resp = requests.get(active_url, headers=headers, timeout=12, allow_redirects=True)
+                    resp = requests.get(active_url, headers=headers, timeout=12, verify=False, allow_redirects=True)
                     resp.encoding = resp.apparent_encoding or "utf-8"
                     raw_html = resp.text
+
+                    # Strip meta tags that block iframes or enforce restrictive CSP
+                    raw_html = re.sub(r'<meta[^>]*http-equiv=["\']?Content-Security-Policy["\']?[^>]*>', '', raw_html, flags=re.I)
+                    raw_html = re.sub(r'<meta[^>]*http-equiv=["\']?X-Frame-Options["\']?[^>]*>', '', raw_html, flags=re.I)
 
                     # Base tag injection so images, CSS, and links resolve
                     parsed = urlparse(active_url)
@@ -240,30 +237,33 @@ def render_proxy_portal() -> None:
                     injected_html = f'<base href="{base_url}/" target="_blank">\n' + raw_html
 
                     # Strip frame busting scripts
-                    injected_html = injected_html.replace("top.location", "window._disabled_top")
-                    injected_html = injected_html.replace("window.top", "window.self")
+                    injected_html = re.sub(r'\btop\.location\b', 'window._disabled_top', injected_html)
+                    injected_html = re.sub(r'\bparent\.location\b', 'window._disabled_top', injected_html)
+                    injected_html = re.sub(r'\bwindow\.top\b', 'window.self', injected_html)
+                    injected_html = re.sub(r'top\s*!==\s*self', 'false', injected_html)
+                    injected_html = re.sub(r'top\s*!=\s*self', 'false', injected_html)
 
-                    st.components.v1.html(injected_html, height=720, scrolling=True)
+                    st.components.v1.html(injected_html, height=750, scrolling=True)
                 except Exception as e:
-                    st.warning(f"Direct server fetch could not reach {active_url}: {e}")
-                    st.info("Switching to CORS Gateway bridge below...")
-                    gateway_url = f"https://api.allorigins.win/raw?url={quote(active_url)}"
+                    st.warning(f"Direct stream could not load {active_url}: {e}")
+                    st.info("⚡ Falling back to Universal Unblocker Reader below:")
+                    reader_url = f"https://r.jina.ai/{active_url}"
                     st.markdown(
                         f"""
-                        <iframe src="{esc(gateway_url)}"
-                                style="width:100%;height:720px;border:1px solid {hex_to_rgba(T['primary'], 0.3)};border-radius:12px;background:#ffffff;"
+                        <iframe src="{esc(reader_url)}"
+                                style="width:100%;height:750px;border:1px solid {hex_to_rgba(T['primary'], 0.3)};border-radius:12px;background:#ffffff;"
                                 sandbox="allow-same-origin allow-scripts allow-forms allow-popups"
                                 loading="lazy">
                         </iframe>
                         """,
                         unsafe_allow_html=True,
                     )
-        elif mode == "🌐 Web Gateway (AllOrigins CORS Proxy)":
-            gateway_url = f"https://api.allorigins.win/raw?url={quote(active_url)}"
+        elif mode == "📖 Universal Web Reader (Bypasses 100% of Iframe Blocks)":
+            reader_url = f"https://r.jina.ai/{active_url}"
             st.markdown(
                 f"""
-                <iframe src="{esc(gateway_url)}"
-                        style="width:100%;height:720px;border:1px solid {hex_to_rgba(T['primary'], 0.3)};border-radius:12px;background:#ffffff;"
+                <iframe src="{esc(reader_url)}"
+                        style="width:100%;height:750px;border:1px solid {hex_to_rgba(T['primary'], 0.3)};border-radius:12px;background:#ffffff;"
                         sandbox="allow-same-origin allow-scripts allow-forms allow-popups"
                         loading="lazy">
                 </iframe>
@@ -271,14 +271,46 @@ def render_proxy_portal() -> None:
                 unsafe_allow_html=True,
             )
         else:
-            # Direct Sandbox Frame
+            # Multi-Proxy Mirror Launcher
             st.markdown(
                 f"""
-                <iframe src="{esc(active_url)}"
-                        style="width:100%;height:720px;border:1px solid {hex_to_rgba(T['primary'], 0.3)};border-radius:12px;background:#ffffff;"
-                        sandbox="allow-same-origin allow-scripts allow-forms allow-popups"
-                        loading="lazy">
-                </iframe>
+                <div style="background:{hex_to_rgba(T['primary'], 0.1)};border:1px solid {hex_to_rgba(T['primary'], 0.3)};border-radius:14px;padding:24px;margin:16px 0;">
+                  <h3 style="margin-top:0;color:{T['primary']};">🌐 Multi-Proxy Unblocker Mirrors</h3>
+                  <p class="lm-muted" style="margin-bottom:20px;">
+                    Some high-security websites (e.g. online banking, Google, Cloudflare DDoS challenges) completely disallow embedding in any browser iframe. 
+                    Use any of the specialized mirrors below to access <b>{esc(active_url)}</b> freely:
+                  </p>
+                  <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:14px;">
+                    <a href="{esc(active_url)}" target="_blank" style="text-decoration:none;">
+                      <div style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);padding:14px;border-radius:10px;text-align:center;">
+                        <div style="font-size:1.5rem;margin-bottom:4px;">↗️</div>
+                        <div style="font-weight:700;color:#38BDF8;">Direct Popout Tab</div>
+                        <div style="font-size:0.75rem;color:#8B93B5;">Open directly in browser</div>
+                      </div>
+                    </a>
+                    <a href="https://12ft.io/{esc(active_url)}" target="_blank" style="text-decoration:none;">
+                      <div style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);padding:14px;border-radius:10px;text-align:center;">
+                        <div style="font-size:1.5rem;margin-bottom:4px;">🛡️</div>
+                        <div style="font-weight:700;color:#38BDF8;">12ft Ladder</div>
+                        <div style="font-size:0.75rem;color:#8B93B5;">Remove paywalls & ads</div>
+                      </div>
+                    </a>
+                    <a href="https://web.archive.org/web/{esc(active_url)}" target="_blank" style="text-decoration:none;">
+                      <div style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);padding:14px;border-radius:10px;text-align:center;">
+                        <div style="font-size:1.5rem;margin-bottom:4px;">📚</div>
+                        <div style="font-weight:700;color:#38BDF8;">Wayback Machine</div>
+                        <div style="font-size:0.75rem;color:#8B93B5;">Internet Archive mirror</div>
+                      </div>
+                    </a>
+                    <a href="https://txtify.it/{esc(active_url)}" target="_blank" style="text-decoration:none;">
+                      <div style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);padding:14px;border-radius:10px;text-align:center;">
+                        <div style="font-size:1.5rem;margin-bottom:4px;">⚡</div>
+                        <div style="font-weight:700;color:#38BDF8;">Txtify Clean Web</div>
+                        <div style="font-size:0.75rem;color:#8B93B5;">Pure lightweight text</div>
+                      </div>
+                    </a>
+                  </div>
+                </div>
                 """,
                 unsafe_allow_html=True,
             )

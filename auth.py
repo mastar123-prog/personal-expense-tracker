@@ -126,7 +126,7 @@ def get_smtp_config() -> dict[str, Any]:
     }
 
 
-def send_auth_email(to_email: str, subject: str, code: str, purpose: str) -> tuple[bool, str]:
+def send_auth_email(to_email: str, subject: str, code: str, purpose: str) -> tuple[bool, str, bool]:
     """Send authentication code. Uses real SMTP if configured; otherwise dispatches cleanly without requiring .env."""
     clean_email = to_email.strip().lower()
     cfg = get_smtp_config()
@@ -159,24 +159,18 @@ def send_auth_email(to_email: str, subject: str, code: str, purpose: str) -> tup
             server.login(cfg["user"], cfg["pass"])
             server.sendmail(cfg["sender"], [clean_email], msg.as_string())
             server.quit()
-            return True, f"Verification code sent to {clean_email}! Check your inbox."
+            return True, f"Verification code sent to {clean_email}! Check your inbox.", True
         except Exception:
             pass  # Fall through to seamless local dispatch
 
-    # Seamless dispatch: User does NOT need to configure .env!
-    st.session_state["_auth_code_notice"] = {
-        "email": clean_email,
-        "code": code,
-        "purpose": purpose,
-    }
-    return True, f"Verification code dispatched for {clean_email}!"
+    return True, f"Activation code generated for {clean_email}.", False
 
 
-def request_password_reset(username_or_email: str) -> tuple[bool, str, str | None]:
-    """Initiate password reset for a username or email. Returns (success, msg, email)."""
+def request_password_reset(username_or_email: str) -> tuple[bool, str, str | None, str | None, bool]:
+    """Initiate password reset for a username or email. Returns (success, msg, email, code, sent_via_smtp)."""
     identifier = username_or_email.strip().lower()
     if not identifier:
-        return False, "Please provide your username or email.", None
+        return False, "Please provide your username or email.", None, None, False
 
     with db._conn() as con:
         row = con.execute(
@@ -185,16 +179,16 @@ def request_password_reset(username_or_email: str) -> tuple[bool, str, str | Non
         ).fetchone()
 
     if not row:
-        return False, "No account found with that username or email.", None
+        return False, "No account found with that username or email.", None, None, False
 
     email = row["email"]
     code = create_otp(email, "reset_password", validity_minutes=15)
-    sent_via_smtp, info = send_auth_email(
+    _, info, sent_via_smtp = send_auth_email(
         email, "Lumen · Password Reset Code", code, "Password Reset"
     )
     if sent_via_smtp:
-        return True, f"Password reset code sent to {email}.", email
-    return False, info, None
+        return True, f"Password reset code sent to {email}.", email, code, True
+    return True, f"Password reset code generated for {email}.", email, code, False
 
 
 def reset_password_with_otp(email: str, code: str, new_password: str) -> tuple[bool, str]:
@@ -215,24 +209,22 @@ def reset_password_with_otp(email: str, code: str, new_password: str) -> tuple[b
     return True, "Password reset successfully! You can now sign in."
 
 
-def request_email_login_otp(email: str) -> tuple[bool, str]:
-    """Send one-time passwordless login code to user's registered email."""
+def request_email_login_otp(email: str) -> tuple[bool, str, str | None, bool]:
+    """Send one-time passwordless login code to user's registered email. Returns (success, msg, code, sent_via_smtp)."""
     clean_email = email.strip().lower()
     if not clean_email or "@" not in clean_email:
-        return False, "Please enter a valid email address."
+        return False, "Please enter a valid email address.", None, False
 
     with db._conn() as con:
         user = con.execute("SELECT id FROM users WHERE email = ?", (clean_email,)).fetchone()
     if not user:
-        return False, "No account found with this email. Please create an account first."
+        return False, "No account found with this email. Please create an account first.", None, False
 
     code = create_otp(clean_email, "email_login", validity_minutes=15)
-    sent_via_smtp, msg = send_auth_email(
+    _, msg, sent_via_smtp = send_auth_email(
         clean_email, "Lumen · Your Sign-in Code", code, "Passwordless Sign-in"
     )
-    if sent_via_smtp:
-        return True, f"Login code sent to {clean_email}!"
-    return False, msg
+    return True, msg, code, sent_via_smtp
 
 
 def login_with_email_otp(email: str, code: str) -> tuple[bool, str, dict[str, Any] | None]:
@@ -452,18 +444,6 @@ def render_auth_page() -> None:
             """
         )
 
-        notice = st.session_state.get("_auth_code_notice")
-        if notice:
-            ui.html(
-                f"""
-                <div class="lm-card" style="padding:.75rem 1rem;margin-bottom:1rem;border-left:4px solid #38BDF8;background:rgba(56,189,248,0.12);">
-                  <div style="font-size:.78rem;color:#7C9CFF;font-weight:700;text-transform:uppercase;letter-spacing:.05em;">📬 Verification Code Dispatched</div>
-                  <div style="font-size:1.45rem;font-weight:800;letter-spacing:5px;color:#38BDF8;margin:.2rem 0;">{notice['code']}</div>
-                  <div class="lm-muted" style="font-size:.78rem;">Sent for <b>{notice['email']}</b> ({notice['purpose']}). Enter code below.</div>
-                </div>
-                """
-            )
-
         tab_login, tab_signup, tab_forgot, tab_otp = st.tabs(
             ["🔑  Sign In", "✨  Create Account", "🆘  Forgot Password", "📬  Email OTP"]
         )
@@ -503,7 +483,7 @@ def render_auth_page() -> None:
                 else:
                     st.error("Demo account could not be found.")
 
-        # Tab 2: Create Account with optional Email Verification
+        # Tab 2: Create Account with Email Verification
         with tab_signup:
             st.markdown("**New to Lumen?** Set up your personal ledger:")
             c1, c2 = st.columns([3, 1])
@@ -520,8 +500,7 @@ def render_auth_page() -> None:
             su_cpwd = p2.text_input("Confirm Password", type="password", placeholder="Re-enter password", key="su_cpwd")
 
             st.write("")
-            s1, s2 = st.columns([1.5, 1], vertical_alignment="bottom")
-            if s1.button("Send Verification Code", icon=":material/mail:", width="stretch", key="su_send_code"):
+            if st.button("Send Verification Code", icon=":material/mail:", width="stretch", key="su_send_code"):
                 if not su_email or "@" not in su_email:
                     st.error("Please enter a valid email address.")
                 elif not su_user or len(su_user) < 3:
@@ -531,68 +510,131 @@ def render_auth_page() -> None:
                 elif su_pwd != su_cpwd:
                     st.error("Passwords do not match!")
                 else:
-                    code = create_otp(su_email, "signup_verify", validity_minutes=15)
-                    sent, info = send_auth_email(su_email, "Lumen · Verification Code", code, "Account Verification")
-                    st.session_state["su_code_sent"] = True
-                    st.success(info)
-                    st.toast(info, icon="📧")
-                    st.rerun()
+                    clean_u = su_user.strip().lower()
+                    clean_e = su_email.strip().lower()
+                    with db._conn() as con:
+                        taken = con.execute("SELECT username, email FROM users WHERE username = ? OR email = ?", (clean_u, clean_e)).fetchone()
+                    if taken:
+                        if taken["username"] == clean_u:
+                            st.error("Username is already taken. Please choose another.")
+                        else:
+                            st.error("Email is already registered. Please sign in.")
+                    else:
+                        code = create_otp(su_email, "signup_verify", validity_minutes=15)
+                        _, info, sent_smtp = send_auth_email(su_email, "Lumen · Verification Code", code, "Account Verification")
+                        st.session_state["su_status"] = {
+                            "code": code,
+                            "email": clean_e,
+                            "sent_smtp": sent_smtp,
+                        }
+                        if not sent_smtp:
+                            st.session_state["su_code_field"] = code
+                        st.toast("Verification code ready!", icon="📧")
 
-            active_notice = st.session_state.get("_auth_code_notice")
-            default_code = ""
-            if active_notice and active_notice.get("email") == su_email.strip().lower():
-                default_code = active_notice.get("code", "")
+            status = st.session_state.get("su_status")
+            if status and status.get("email") == su_email.strip().lower():
+                if status.get("sent_smtp"):
+                    st.success(f"✅ Real verification email sent to **{status['email']}**! Please check your inbox.")
+                else:
+                    st.markdown(
+                        f"""
+                        <div style="background:rgba(56,189,248,0.12);border:1px solid rgba(56,189,248,0.4);border-radius:12px;padding:14px 18px;margin:12px 0;text-align:center;">
+                          <div style="font-size:0.75rem;font-weight:700;color:#38BDF8;text-transform:uppercase;letter-spacing:0.06em;">📬 Instant Activation Code</div>
+                          <div style="font-size:2.2rem;font-weight:800;letter-spacing:6px;color:#38BDF8;margin:6px 0;">{status['code']}</div>
+                          <div style="font-size:0.8rem;color:#c4c9e2;">Generated for <b>{status['email']}</b> (No .env setup needed). Auto-filled below for you!</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
 
             su_code_input = st.text_input(
                 "6-Digit Verification Code",
-                value=default_code if not st.session_state.get("su_code_val") else st.session_state.get("su_code_val"),
+                key="su_code_field",
                 placeholder="Enter 6-digit code",
-                key="su_code_val",
                 max_chars=6,
             )
 
             if st.button("Confirm Code & Create Account", type="primary", icon=":material/verified_user:", width="stretch", key="su_verify_submit"):
-                if not su_code_input:
+                code_to_check = (su_code_input or "").strip()
+                if not su_email:
+                    st.error("Please enter your email address and request a verification code.")
+                elif not code_to_check:
                     st.error("Please enter the 6-digit verification code.")
-                elif not verify_otp(su_email, "signup_verify", su_code_input):
-                    st.error("Invalid or expired verification code.")
+                elif not verify_otp(su_email, "signup_verify", code_to_check):
+                    st.error("Invalid or expired verification code. Please request a new code.")
                 else:
                     ok, msg, new_user = register_user(su_user, su_email, su_pwd, su_name, su_avatar)
                     if ok and new_user:
                         st.toast("Email verified! Welcome to Lumen.", icon="🎉")
-                        st.session_state.pop("_auth_code_notice", None)
+                        st.session_state.pop("su_status", None)
+                        st.session_state.pop("su_code_field", None)
                         sign_in(new_user)
                     else:
                         st.error(msg)
+
+            with st.expander("⚙️ Optional: Connect Gmail/Outlook for real email delivery (No .env file needed!)"):
+                st.caption("You do NOT need to touch .env! Configure your email credentials right here in the app:")
+                c_h, c_p = st.columns([2, 1])
+                smtp_h = c_h.text_input("SMTP Server Host", value="smtp.gmail.com", key="auth_smtp_h")
+                smtp_p = c_p.number_input("Port", value=587, min_value=1, max_value=65535, key="auth_smtp_p")
+                c_u, c_pw = st.columns(2)
+                smtp_u = c_u.text_input("Your Email", placeholder="you@gmail.com", key="auth_smtp_u")
+                smtp_pw = c_pw.text_input("App Password", type="password", placeholder="16-character app password", key="auth_smtp_pw")
+                if st.button("Save Credentials to App", icon=":material/save:", key="auth_save_smtp"):
+                    if not smtp_u or not smtp_pw:
+                        st.error("Please enter both email and app password.")
+                    else:
+                        db.set_setting("smtp_host", smtp_h.strip(), user_id=1)
+                        db.set_setting("smtp_port", str(smtp_p), user_id=1)
+                        db.set_setting("smtp_user", smtp_u.strip(), user_id=1)
+                        db.set_setting("smtp_pass", smtp_pw.strip(), user_id=1)
+                        db.set_setting("smtp_sender", smtp_u.strip(), user_id=1)
+                        st.success("Credentials saved to database! Emails will now send directly from your account.")
 
         # Tab 3: Forgot Password
         with tab_forgot:
             st.markdown("**Reset your password** securely via email verification code:")
             reset_ident = st.text_input("Enter your Username or Email", placeholder="e.g. alex@example.com", key="fp_ident")
 
-            f_col1, f_col2 = st.columns([1.5, 1], vertical_alignment="bottom")
-            if f_col1.button("Request Reset Code", icon=":material/send:", width="stretch", key="fp_request_btn"):
-                ok, msg, email_found = request_password_reset(reset_ident)
+            if st.button("Request Reset Code", icon=":material/send:", width="stretch", key="fp_request_btn"):
+                ok, msg, email_found, code, sent_smtp = request_password_reset(reset_ident)
                 if ok:
-                    st.session_state["fp_email"] = email_found
-                    st.success(msg)
+                    st.session_state["fp_status"] = {
+                        "email": email_found,
+                        "code": code,
+                        "sent_smtp": sent_smtp,
+                    }
+                    if not sent_smtp:
+                        st.session_state["fp_code_field"] = code
                     st.toast(msg, icon="🔑")
                 else:
                     st.error(msg)
 
-            target_email = st.session_state.get("fp_email")
-            if target_email:
-                st.info(f"A 6-digit code has been generated for **{target_email}**.")
+            fp_stat = st.session_state.get("fp_status")
+            if fp_stat:
+                if fp_stat.get("sent_smtp"):
+                    st.success(f"✅ Reset code sent to **{fp_stat['email']}**! Please check your inbox.")
+                else:
+                    st.markdown(
+                        f"""
+                        <div style="background:rgba(56,189,248,0.12);border:1px solid rgba(56,189,248,0.4);border-radius:12px;padding:12px 16px;margin:10px 0;text-align:center;">
+                          <div style="font-size:0.75rem;font-weight:700;color:#38BDF8;text-transform:uppercase;letter-spacing:0.06em;">📬 Password Reset Code</div>
+                          <div style="font-size:2rem;font-weight:800;letter-spacing:6px;color:#38BDF8;margin:4px 0;">{fp_stat['code']}</div>
+                          <div style="font-size:0.78rem;color:#c4c9e2;">Generated for <b>{fp_stat['email']}</b> (No .env setup needed). Auto-filled below!</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
 
             with st.form("reset_pwd_form", border=True):
                 st.markdown("**Enter code and new password:**")
-                fp_code = st.text_input("6-Digit Reset Code", placeholder="e.g. 123456", max_chars=6)
+                fp_code = st.text_input("6-Digit Reset Code", value=st.session_state.get("fp_code_field", ""), placeholder="e.g. 123456", max_chars=6)
                 np1, np2 = st.columns(2)
                 new_pwd = np1.text_input("New Password", type="password", placeholder="At least 6 chars")
                 confirm_npwd = np2.text_input("Confirm New Password", type="password", placeholder="Re-enter password")
 
                 if st.form_submit_button("Reset Password & Sign In", type="primary", icon=":material/lock_reset:", width="stretch"):
-                    active_email = target_email or reset_ident
+                    active_email = (fp_stat.get("email") if fp_stat else None) or reset_ident.strip().lower()
                     if not active_email or "@" not in active_email:
                         st.error("Please enter or verify your registered email address.")
                     elif not fp_code:
@@ -603,8 +645,8 @@ def render_auth_page() -> None:
                         ok, msg = reset_password_with_otp(active_email, fp_code, new_pwd)
                         if ok:
                             st.toast(msg, icon="✅")
-                            st.session_state.pop("fp_email", None)
-                            # Attempt instant sign-in
+                            st.session_state.pop("fp_status", None)
+                            st.session_state.pop("fp_code_field", None)
                             ok_l, _, u = authenticate_user(active_email, new_pwd)
                             if ok_l and u:
                                 sign_in(u)
@@ -617,16 +659,37 @@ def render_auth_page() -> None:
             otp_email = st.text_input("Registered Email Address", placeholder="you@example.com", key="otp_login_email")
 
             if st.button("Send One-Time Code", icon=":material/mail:", width="stretch", key="otp_send_btn"):
-                ok, msg = request_email_login_otp(otp_email)
+                ok, msg, code, sent_smtp = request_email_login_otp(otp_email)
                 if ok:
-                    st.success(msg)
+                    st.session_state["otp_status"] = {
+                        "email": otp_email.strip().lower(),
+                        "code": code,
+                        "sent_smtp": sent_smtp,
+                    }
+                    if not sent_smtp:
+                        st.session_state["otp_code_field"] = code
                     st.toast(msg, icon="📬")
-                    st.session_state["otp_login_ready"] = True
                 else:
                     st.error(msg)
 
+            otp_stat = st.session_state.get("otp_status")
+            if otp_stat and otp_stat.get("email") == otp_email.strip().lower():
+                if otp_stat.get("sent_smtp"):
+                    st.success(f"✅ One-time sign-in code sent to **{otp_stat['email']}**! Check your inbox.")
+                else:
+                    st.markdown(
+                        f"""
+                        <div style="background:rgba(56,189,248,0.12);border:1px solid rgba(56,189,248,0.4);border-radius:12px;padding:12px 16px;margin:10px 0;text-align:center;">
+                          <div style="font-size:0.75rem;font-weight:700;color:#38BDF8;text-transform:uppercase;letter-spacing:0.06em;">📬 One-Time Sign-In Code</div>
+                          <div style="font-size:2rem;font-weight:800;letter-spacing:6px;color:#38BDF8;margin:4px 0;">{otp_stat['code']}</div>
+                          <div style="font-size:0.78rem;color:#c4c9e2;">Generated for <b>{otp_stat['email']}</b> (No .env setup needed). Auto-filled below!</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
             with st.form("otp_login_form", border=True):
-                code_entered = st.text_input("6-Digit Login Code", placeholder="••••••", max_chars=6)
+                code_entered = st.text_input("6-Digit Login Code", value=st.session_state.get("otp_code_field", ""), placeholder="••••••", max_chars=6)
                 if st.form_submit_button("Sign In with Code", type="primary", icon=":material/login:", width="stretch"):
                     if not otp_email:
                         st.error("Please enter your registered email address.")
@@ -636,6 +699,8 @@ def render_auth_page() -> None:
                         ok, msg, user_obj = login_with_email_otp(otp_email, code_entered)
                         if ok and user_obj:
                             st.toast(msg, icon="🎉")
+                            st.session_state.pop("otp_status", None)
+                            st.session_state.pop("otp_code_field", None)
                             sign_in(user_obj)
                         else:
                             st.error(msg)

@@ -585,7 +585,7 @@ def _render_daily_view(df: pd.DataFrame) -> None:
 
 def page_dashboard() -> None:
     # Handle secret proxy suite launch via query param or session state
-    if st.query_params.get("proxy") == "1":
+    if st.query_params.get("proxy") == "1" or st.session_state.get("show_proxy_portal"):
         st.query_params.clear()
         st.session_state["show_proxy_portal"] = True
 
@@ -604,43 +604,74 @@ def page_dashboard() -> None:
         greet_title = f"{_greeting()}{', ' + esc(name) if name else ''}"
         sub_title = f"Here's your money story · {date.today():%A, %B %d}"
 
-        # 100% Vector Themed Sparkle: NOT an emoji, NO button, NO outline
+        # Natural Themed Sparkle Trigger: 100% working button, zero outline, themed star glyph
         html(f"""
-        <div style="margin-bottom:1.1rem">
-          <h1 class="lm-hero-title" style="display:inline-flex;align-items:center;gap:0.45rem;margin:0;line-height:1.2;">
-            <span>{greet_title}</span>
-            <a href="?proxy=1" target="_self" class="lm-secret-sparkle" title=""
-               style="display:inline-flex;align-items:center;justify-content:center;text-decoration:none;border:none;outline:none;box-shadow:none;background:none;cursor:default;-webkit-tap-highlight-color:transparent;">
-              <svg width="24" height="24" viewBox="0 0 24 24" style="overflow:visible;vertical-align:middle;display:inline-block;transition:all 0.3s ease;">
-                <defs>
-                  <linearGradient id="spk_grad" x1="0%" y1="0%" x2="100%" y2="100%">
-                    <stop offset="0%" stop-color="{T['primary']}" />
-                    <stop offset="100%" stop-color="{T['accent']}" />
-                  </linearGradient>
-                </defs>
-                <!-- Main 4-point sparkle star -->
-                <path d="M12 1 C12 7, 7 12, 1 12 C7 12, 12 17, 12 23 C12 17, 17 12, 23 12 C17 12, 12 7, 12 1 Z" fill="url(#spk_grad)" />
-                <!-- Subtle companion spark -->
-                <path d="M19 2 C19 4.2, 17.5 5.5, 15.5 5.5 C17.5 5.5, 19 6.8, 19 9 C19 6.8, 20.5 5.5, 22.5 5.5 C20.5 5.5, 19 4.2, 19 2 Z" fill="{T.get('accent2', T['accent'])}" opacity="0.85" />
-              </svg>
-            </a>
-          </h1>
-          <div class="lm-hero-sub" style="margin-top:0.35rem">{sub_title}</div>
-        </div>
         <style>
-        .lm-secret-sparkle, .lm-secret-sparkle:hover, .lm-secret-sparkle:focus, .lm-secret-sparkle:active {{
-          border: none !important;
-          outline: none !important;
-          box-shadow: none !important;
-          background: transparent !important;
-          text-decoration: none !important;
+        div[data-testid="stHorizontalBlock"]:has(div.st-key-sparkle_proxy_trigger) {{
+            align-items: center !important;
+            gap: 0.35rem !important;
+            width: fit-content !important;
+            margin-bottom: 0 !important;
         }}
-        .lm-secret-sparkle:hover svg {{
-          transform: scale(1.18) rotate(10deg);
-          filter: drop-shadow(0 0 8px {T['accent']});
+        div[data-testid="stHorizontalBlock"]:has(div.st-key-sparkle_proxy_trigger) > div[data-testid="stColumn"] {{
+            width: auto !important;
+            flex: 0 0 auto !important;
+            min-width: unset !important;
+        }}
+        div.st-key-sparkle_proxy_trigger {{
+            display: inline-flex !important;
+            align-items: center !important;
+            margin: 0 !important;
+            padding: 0 !important;
+        }}
+        div.st-key-sparkle_proxy_trigger button,
+        div.st-key-sparkle_proxy_trigger button:hover,
+        div.st-key-sparkle_proxy_trigger button:focus,
+        div.st-key-sparkle_proxy_trigger button:active,
+        div.st-key-sparkle_proxy_trigger button:focus-visible {{
+            background: transparent !important;
+            background-color: transparent !important;
+            border: none !important;
+            border-width: 0 !important;
+            box-shadow: none !important;
+            outline: none !important;
+            outline-width: 0 !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            min-height: unset !important;
+            height: auto !important;
+            line-height: 1 !important;
+            font-size: 1.85rem !important;
+            cursor: pointer !important;
+            background: linear-gradient(135deg, {T['primary']}, {T['accent']}) !important;
+            -webkit-background-clip: text !important;
+            -webkit-text-fill-color: transparent !important;
+            transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), filter 0.25s ease !important;
+        }}
+        div.st-key-sparkle_proxy_trigger button:hover {{
+            transform: scale(1.22) rotate(15deg) !important;
+            filter: drop-shadow(0 0 8px {T['accent']}) !important;
+        }}
+        div.st-key-sparkle_proxy_trigger div[data-testid="stMarkdownContainer"] p {{
+            font-size: 1.85rem !important;
+            line-height: 1 !important;
+            margin: 0 !important;
+            background: linear-gradient(135deg, {T['primary']}, {T['accent']}) !important;
+            -webkit-background-clip: text !important;
+            -webkit-text-fill-color: transparent !important;
         }}
         </style>
         """)
+
+        c_title, c_star = st.columns([1, 1], vertical_alignment="center")
+        with c_title:
+            html(f'<h1 class="lm-hero-title" style="margin:0;white-space:nowrap;">{greet_title}</h1>')
+        with c_star:
+            if st.button("✦", key="sparkle_proxy_trigger", help=None):
+                st.session_state["show_proxy_portal"] = True
+                st.rerun()
+
+        html(f'<div class="lm-hero-sub" style="margin-top:0.35rem;margin-bottom:1.1rem">{sub_title}</div>')
 
     if df.empty:
         empty_state("🪙", "Your financial canvas is empty",
