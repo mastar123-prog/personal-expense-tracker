@@ -6,6 +6,7 @@ Accessible via the secret '✨' sparkle on the home greeting.
 from __future__ import annotations
 
 import html
+import re
 import socket
 from datetime import datetime
 from typing import Any
@@ -13,6 +14,7 @@ from urllib.parse import quote, urlparse
 
 import requests
 import streamlit as st
+import urllib3
 
 import db
 from themes import hex_to_rgba
