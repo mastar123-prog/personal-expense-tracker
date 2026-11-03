@@ -126,51 +126,164 @@ def get_smtp_config() -> dict[str, Any]:
     }
 
 
-def send_auth_email(to_email: str, subject: str, code: str, purpose: str) -> tuple[bool, str, bool]:
-    """Send authentication code. Uses real SMTP if configured; otherwise dispatches cleanly without requiring .env."""
+# ----------------------------------------------------------------------------- DNS MX & Email Delivery
+WELL_KNOWN_MX: dict[str, list[tuple[int, str]]] = {
+    "gmail.com": [(5, "gmail-smtp-in.l.google.com"), (10, "alt1.gmail-smtp-in.l.google.com"), (20, "alt2.gmail-smtp-in.l.google.com")],
+    "googlemail.com": [(5, "gmail-smtp-in.l.google.com"), (10, "alt1.gmail-smtp-in.l.google.com")],
+    "outlook.com": [(10, "outlook-com.olc.protection.outlook.com")],
+    "hotmail.com": [(10, "hotmail-com.olc.protection.outlook.com")],
+    "live.com": [(10, "live-com.olc.protection.outlook.com")],
+    "msn.com": [(10, "msn-com.olc.protection.outlook.com")],
+    "yahoo.com": [(10, "mta5.am0.yahoodns.net"), (10, "mta6.am0.yahoodns.net")],
+    "ymail.com": [(10, "mta5.am0.yahoodns.net")],
+    "icloud.com": [(10, "mx1.mail.icloud.com"), (10, "mx2.mail.icloud.com")],
+    "me.com": [(10, "mx1.mail.icloud.com")],
+    "mac.com": [(10, "mx1.mail.icloud.com")],
+    "proton.me": [(10, "mail.protonmail.ch"), (20, "mailsec.protonmail.ch")],
+    "protonmail.com": [(10, "mail.protonmail.ch")],
+}
+
+
+def get_mx_records(domain: str) -> list[str]:
+    """Resolve DNS MX records for a domain, sorted by priority (lowest preference first)."""
+    import subprocess
+    import re
+
+    clean_dom = domain.strip().lower()
+    if clean_dom in WELL_KNOWN_MX:
+        return [host for _, host in sorted(WELL_KNOWN_MX[clean_dom], key=lambda x: x[0])]
+
+    # 1. Try dnspython if installed
+    try:
+        import dns.resolver
+        answers = dns.resolver.resolve(clean_dom, "MX")
+        sorted_answers = sorted(answers, key=lambda r: r.preference)
+        return [str(r.exchange).rstrip(".") for r in sorted_answers]
+    except Exception:
+        pass
+
+    # 2. Universal OS nslookup tool
+    try:
+        res = subprocess.run(
+            ["nslookup", "-type=MX", clean_dom, "8.8.8.8"],
+            capture_output=True,
+            text=True,
+            timeout=6,
+        )
+        records: list[tuple[int, str]] = []
+        for line in (res.stdout + "\n" + res.stderr).splitlines():
+            m = re.search(r"preference\s*=\s*(\d+).*?mail exchanger\s*=\s*([a-zA-Z0-9.-]+)", line, re.I)
+            if m:
+                records.append((int(m.group(1)), m.group(2).strip().rstrip(".")))
+            else:
+                m2 = re.search(r"mail exchanger\s*=\s*([a-zA-Z0-9.-]+)", line, re.I)
+                if m2:
+                    records.append((10, m2.group(1).strip().rstrip(".")))
+        if records:
+            records.sort(key=lambda x: x[0])
+            return [host for _, host in records]
+    except Exception:
+        pass
+
+    return []
+
+
+def send_auth_email(to_email: str, subject: str, code: str, purpose: str) -> tuple[bool, str]:
+    """Deliver authentication code directly using DNS MX Record Lookups or configured SMTP.
+    
+    Real email verification is strictly required and non-optional: the code is sent
+    directly to the recipient's mail exchange server.
+    """
     clean_email = to_email.strip().lower()
+    if not clean_email or "@" not in clean_email:
+        return False, "Please enter a valid email address."
+
+    domain = clean_email.split("@", 1)[1].strip()
+
+    # DNS MX lookup to ensure domain actually receives email
+    mx_hosts = get_mx_records(domain)
+    if not mx_hosts:
+        return False, f"DNS MX Lookup Failed: No mail servers found for domain '{domain}'. Please verify your email spelling."
+
+    body_text = f"Hello,\n\nYour Lumen verification code for {purpose} is: {code}\n\nThis code expires in 15 minutes. Enter this code into Lumen to complete verification.\n\n— The Lumen Team"
+    body_html = f"""
+    <div style="font-family:'Outfit',-apple-system,sans-serif;max-width:480px;margin:0 auto;padding:24px;background:#0d1124;color:#e6e9f5;border-radius:16px;">
+      <h2 style="color:#7C9CFF;margin-top:0;">✨ Lumen Personal Finance</h2>
+      <p style="font-size:15px;color:#c4c9e2;">Here is your verification code for <b>{purpose}</b>:</p>
+      <div style="background:#141B3A;border:1px solid #7C9CFF;border-radius:12px;padding:16px;text-align:center;margin:20px 0;">
+        <span style="font-size:32px;letter-spacing:6px;font-weight:700;color:#38BDF8;">{code}</span>
+      </div>
+      <p style="font-size:13px;color:#8B93B5;">This code expires in 15 minutes. Check your inbox and enter this code into Lumen to complete verification.</p>
+    </div>
+    """
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["To"] = clean_email
+    msg.attach(MIMEText(body_text, "plain"))
+    msg.attach(MIMEText(body_html, "html"))
+
+    # Priority 1: Configured SMTP credentials (in settings or .env)
     cfg = get_smtp_config()
-
     if cfg["is_configured"]:
-        body_text = f"""Hello,\n\nYour verification code for Lumen ({purpose}) is: {code}\n\nThis code expires in 15 minutes. Enter this code to verify your email.\n\n— The Lumen Team"""
-        body_html = f"""
-        <div style="font-family:'Outfit',-apple-system,sans-serif;max-width:480px;margin:0 auto;padding:24px;background:#0d1124;color:#e6e9f5;border-radius:16px;">
-          <h2 style="color:#7C9CFF;margin-top:0;">✨ Lumen Personal Finance</h2>
-          <p style="font-size:15px;color:#c4c9e2;">Here is your verification code for <b>{purpose}</b>:</p>
-          <div style="background:#141B3A;border:1px solid #7C9CFF;border-radius:12px;padding:16px;text-align:center;margin:20px 0;">
-            <span style="font-size:32px;letter-spacing:6px;font-weight:700;color:#38BDF8;">{code}</span>
-          </div>
-          <p style="font-size:13px;color:#8B93B5;">This code expires in 15 minutes. If you did not make this request, you can safely ignore this message.</p>
-        </div>
-        """
+        sender = cfg["sender"] or cfg["user"]
+        msg["From"] = f"Lumen Finance <{sender}>"
         try:
-            msg = MIMEMultipart("alternative")
-            msg["Subject"] = subject
-            msg["From"] = cfg["sender"]
-            msg["To"] = clean_email
-            msg.attach(MIMEText(body_text, "plain"))
-            msg.attach(MIMEText(body_html, "html"))
-
             if cfg["use_ssl"] or cfg["port"] == 465:
                 server = smtplib.SMTP_SSL(cfg["host"], cfg["port"], timeout=12)
             else:
                 server = smtplib.SMTP(cfg["host"], cfg["port"], timeout=12)
                 server.starttls()
             server.login(cfg["user"], cfg["pass"])
-            server.sendmail(cfg["sender"], [clean_email], msg.as_string())
+            server.sendmail(sender, [clean_email], msg.as_string())
             server.quit()
-            return True, f"Verification code sent to {clean_email}! Check your inbox.", True
+            return True, f"Verification code delivered to {clean_email}! Check your email inbox."
         except Exception:
-            pass  # Fall through to seamless local dispatch
+            pass  # Fall through to direct DNS MX delivery
 
-    return True, f"Activation code generated for {clean_email}.", False
+    # Priority 2: Direct DNS MX Record Lookup delivery
+    sender = "noreply@lumen.finance"
+    msg["From"] = f"Lumen Security <{sender}>"
+
+    last_error = ""
+    for mx_host in mx_hosts:
+        for port in (25, 587):
+            try:
+                server = smtplib.SMTP(mx_host, port, timeout=10)
+                server.ehlo("lumen.finance")
+                if server.has_extn("STARTTLS"):
+                    server.starttls()
+                    server.ehlo("lumen.finance")
+                code_m, resp_m = server.mail(sender)
+                if code_m >= 400:
+                    last_error = f"MX {mx_host}:{port} rejected sender ({code_m})"
+                    server.quit()
+                    continue
+
+                code_r, resp_r = server.rcpt(clean_email)
+                if code_r >= 400:
+                    resp_str = resp_r.decode(errors="ignore").strip()
+                    server.quit()
+                    return False, f"Mailbox rejected by {domain} mail server ({code_r}): {resp_str.splitlines()[0] if resp_str else 'Mailbox unavailable'}"
+
+                code_d, resp_d = server.data(msg.as_string())
+                server.quit()
+                if code_d < 400:
+                    return True, f"Verification email dispatched directly to {clean_email} via DNS MX server ({mx_host})! Check your inbox."
+                else:
+                    last_error = f"MX {mx_host} data rejected ({code_d})"
+            except Exception as e:
+                last_error = str(e)
+                continue
+
+    return False, f"Direct MX delivery to {domain} could not complete ({last_error}). Please ensure the address exists or configure SMTP in Settings."
 
 
-def request_password_reset(username_or_email: str) -> tuple[bool, str, str | None, str | None, bool]:
-    """Initiate password reset for a username or email. Returns (success, msg, email, code, sent_via_smtp)."""
+def request_password_reset(username_or_email: str) -> tuple[bool, str, str | None]:
+    """Initiate password reset for a username or email. Returns (success, msg, email)."""
     identifier = username_or_email.strip().lower()
     if not identifier:
-        return False, "Please provide your username or email.", None, None, False
+        return False, "Please provide your username or email.", None
 
     with db._conn() as con:
         row = con.execute(
@@ -179,16 +292,16 @@ def request_password_reset(username_or_email: str) -> tuple[bool, str, str | Non
         ).fetchone()
 
     if not row:
-        return False, "No account found with that username or email.", None, None, False
+        return False, "No account found with that username or email.", None
 
     email = row["email"]
     code = create_otp(email, "reset_password", validity_minutes=15)
-    _, info, sent_via_smtp = send_auth_email(
+    ok, info = send_auth_email(
         email, "Lumen · Password Reset Code", code, "Password Reset"
     )
-    if sent_via_smtp:
-        return True, f"Password reset code sent to {email}.", email, code, True
-    return True, f"Password reset code generated for {email}.", email, code, False
+    if ok:
+        return True, info, email
+    return False, info, None
 
 
 def reset_password_with_otp(email: str, code: str, new_password: str) -> tuple[bool, str]:
@@ -209,22 +322,22 @@ def reset_password_with_otp(email: str, code: str, new_password: str) -> tuple[b
     return True, "Password reset successfully! You can now sign in."
 
 
-def request_email_login_otp(email: str) -> tuple[bool, str, str | None, bool]:
-    """Send one-time passwordless login code to user's registered email. Returns (success, msg, code, sent_via_smtp)."""
+def request_email_login_otp(email: str) -> tuple[bool, str]:
+    """Send one-time passwordless login code to user's registered email."""
     clean_email = email.strip().lower()
     if not clean_email or "@" not in clean_email:
-        return False, "Please enter a valid email address.", None, False
+        return False, "Please enter a valid email address."
 
     with db._conn() as con:
         user = con.execute("SELECT id FROM users WHERE email = ?", (clean_email,)).fetchone()
     if not user:
-        return False, "No account found with this email. Please create an account first.", None, False
+        return False, "No account found with this email. Please create an account first."
 
     code = create_otp(clean_email, "email_login", validity_minutes=15)
-    _, msg, sent_via_smtp = send_auth_email(
+    ok, msg = send_auth_email(
         clean_email, "Lumen · Your Sign-in Code", code, "Passwordless Sign-in"
     )
-    return True, msg, code, sent_via_smtp
+    return ok, msg
 
 
 def login_with_email_otp(email: str, code: str) -> tuple[bool, str, dict[str, Any] | None]:
@@ -483,7 +596,7 @@ def render_auth_page() -> None:
                 else:
                     st.error("Demo account could not be found.")
 
-        # Tab 2: Create Account with Email Verification
+        # Tab 2: Create Account with DNS MX Email Verification (Mandatory & Non-Optional)
         with tab_signup:
             st.markdown("**New to Lumen?** Set up your personal ledger:")
             c1, c2 = st.columns([3, 1])
@@ -500,7 +613,7 @@ def render_auth_page() -> None:
             su_cpwd = p2.text_input("Confirm Password", type="password", placeholder="Re-enter password", key="su_cpwd")
 
             st.write("")
-            if st.button("Send Verification Code", icon=":material/mail:", width="stretch", key="su_send_code"):
+            if st.button("Send Verification Code via DNS MX", icon=":material/mail:", width="stretch", key="su_send_code"):
                 if not su_email or "@" not in su_email:
                     st.error("Please enter a valid email address.")
                 elif not su_user or len(su_user) < 3:
@@ -521,37 +634,23 @@ def render_auth_page() -> None:
                             st.error("Email is already registered. Please sign in.")
                     else:
                         code = create_otp(su_email, "signup_verify", validity_minutes=15)
-                        _, info, sent_smtp = send_auth_email(su_email, "Lumen · Verification Code", code, "Account Verification")
-                        st.session_state["su_status"] = {
-                            "code": code,
-                            "email": clean_e,
-                            "sent_smtp": sent_smtp,
-                        }
-                        if not sent_smtp:
-                            st.session_state["su_code_field"] = code
-                        st.toast("Verification code ready!", icon="📧")
+                        ok, info = send_auth_email(su_email, "Lumen · Account Verification Code", code, "Account Verification")
+                        if ok:
+                            st.session_state["su_email_verified_target"] = clean_e
+                            st.success(f"📬 {info}")
+                            st.toast("Verification email sent!", icon="📧")
+                        else:
+                            st.error(f"❌ {info}")
 
-            status = st.session_state.get("su_status")
-            if status and status.get("email") == su_email.strip().lower():
-                if status.get("sent_smtp"):
-                    st.success(f"✅ Real verification email sent to **{status['email']}**! Please check your inbox.")
-                else:
-                    st.markdown(
-                        f"""
-                        <div style="background:rgba(56,189,248,0.12);border:1px solid rgba(56,189,248,0.4);border-radius:12px;padding:14px 18px;margin:12px 0;text-align:center;">
-                          <div style="font-size:0.75rem;font-weight:700;color:#38BDF8;text-transform:uppercase;letter-spacing:0.06em;">📬 Instant Activation Code</div>
-                          <div style="font-size:2.2rem;font-weight:800;letter-spacing:6px;color:#38BDF8;margin:6px 0;">{status['code']}</div>
-                          <div style="font-size:0.8rem;color:#c4c9e2;">Generated for <b>{status['email']}</b> (No .env setup needed). Auto-filled below for you!</div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
+            verified_target = st.session_state.get("su_email_verified_target")
+            if verified_target and verified_target == su_email.strip().lower():
+                st.info(f"📧 A 6-digit verification code has been dispatched to **{verified_target}** via DNS MX lookup. Please check your inbox (and spam folder) and enter it below:")
 
             su_code_input = st.text_input(
                 "6-Digit Verification Code",
-                key="su_code_field",
-                placeholder="Enter 6-digit code",
+                placeholder="e.g. 123456",
                 max_chars=6,
+                key="su_code_input_field",
             )
 
             if st.button("Confirm Code & Create Account", type="primary", icon=":material/verified_user:", width="stretch", key="su_verify_submit"):
@@ -559,21 +658,20 @@ def render_auth_page() -> None:
                 if not su_email:
                     st.error("Please enter your email address and request a verification code.")
                 elif not code_to_check:
-                    st.error("Please enter the 6-digit verification code.")
+                    st.error("Please enter the 6-digit verification code sent to your email.")
                 elif not verify_otp(su_email, "signup_verify", code_to_check):
-                    st.error("Invalid or expired verification code. Please request a new code.")
+                    st.error("Invalid or expired verification code. Please check your email inbox and try again.")
                 else:
                     ok, msg, new_user = register_user(su_user, su_email, su_pwd, su_name, su_avatar)
                     if ok and new_user:
                         st.toast("Email verified! Welcome to Lumen.", icon="🎉")
-                        st.session_state.pop("su_status", None)
-                        st.session_state.pop("su_code_field", None)
+                        st.session_state.pop("su_email_verified_target", None)
                         sign_in(new_user)
                     else:
                         st.error(msg)
 
-            with st.expander("⚙️ Optional: Connect Gmail/Outlook for real email delivery (No .env file needed!)"):
-                st.caption("You do NOT need to touch .env! Configure your email credentials right here in the app:")
+            with st.expander("⚙️ Optional: Connect Gmail/Outlook SMTP (No .env file needed)"):
+                st.caption("Lumen automatically uses DNS MX record lookups to deliver emails. If your mail provider prefers authenticated SMTP relay, configure credentials directly here without editing .env:")
                 c_h, c_p = st.columns([2, 1])
                 smtp_h = c_h.text_input("SMTP Server Host", value="smtp.gmail.com", key="auth_smtp_h")
                 smtp_p = c_p.number_input("Port", value=587, min_value=1, max_value=65535, key="auth_smtp_p")
@@ -593,60 +691,42 @@ def render_auth_page() -> None:
 
         # Tab 3: Forgot Password
         with tab_forgot:
-            st.markdown("**Reset your password** securely via email verification code:")
+            st.markdown("**Reset your password** securely via real email verification code:")
             reset_ident = st.text_input("Enter your Username or Email", placeholder="e.g. alex@example.com", key="fp_ident")
 
-            if st.button("Request Reset Code", icon=":material/send:", width="stretch", key="fp_request_btn"):
-                ok, msg, email_found, code, sent_smtp = request_password_reset(reset_ident)
-                if ok:
-                    st.session_state["fp_status"] = {
-                        "email": email_found,
-                        "code": code,
-                        "sent_smtp": sent_smtp,
-                    }
-                    if not sent_smtp:
-                        st.session_state["fp_code_field"] = code
-                    st.toast(msg, icon="🔑")
+            if st.button("Request Reset Code via DNS MX", icon=":material/send:", width="stretch", key="fp_request_btn"):
+                ok, msg, email_found = request_password_reset(reset_ident)
+                if ok and email_found:
+                    st.session_state["fp_target_email"] = email_found
+                    st.success(f"📬 {msg}")
+                    st.toast("Password reset email dispatched!", icon="🔑")
                 else:
                     st.error(msg)
 
-            fp_stat = st.session_state.get("fp_status")
-            if fp_stat:
-                if fp_stat.get("sent_smtp"):
-                    st.success(f"✅ Reset code sent to **{fp_stat['email']}**! Please check your inbox.")
-                else:
-                    st.markdown(
-                        f"""
-                        <div style="background:rgba(56,189,248,0.12);border:1px solid rgba(56,189,248,0.4);border-radius:12px;padding:12px 16px;margin:10px 0;text-align:center;">
-                          <div style="font-size:0.75rem;font-weight:700;color:#38BDF8;text-transform:uppercase;letter-spacing:0.06em;">📬 Password Reset Code</div>
-                          <div style="font-size:2rem;font-weight:800;letter-spacing:6px;color:#38BDF8;margin:4px 0;">{fp_stat['code']}</div>
-                          <div style="font-size:0.78rem;color:#c4c9e2;">Generated for <b>{fp_stat['email']}</b> (No .env setup needed). Auto-filled below!</div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
+            fp_target = st.session_state.get("fp_target_email")
+            if fp_target:
+                st.info(f"📧 A 6-digit password reset code was sent to **{fp_target}** via DNS MX. Please check your inbox and enter it below:")
 
             with st.form("reset_pwd_form", border=True):
                 st.markdown("**Enter code and new password:**")
-                fp_code = st.text_input("6-Digit Reset Code", value=st.session_state.get("fp_code_field", ""), placeholder="e.g. 123456", max_chars=6)
+                fp_code = st.text_input("6-Digit Reset Code", placeholder="e.g. 123456", max_chars=6)
                 np1, np2 = st.columns(2)
                 new_pwd = np1.text_input("New Password", type="password", placeholder="At least 6 chars")
                 confirm_npwd = np2.text_input("Confirm New Password", type="password", placeholder="Re-enter password")
 
                 if st.form_submit_button("Reset Password & Sign In", type="primary", icon=":material/lock_reset:", width="stretch"):
-                    active_email = (fp_stat.get("email") if fp_stat else None) or reset_ident.strip().lower()
+                    active_email = fp_target or reset_ident.strip().lower()
                     if not active_email or "@" not in active_email:
                         st.error("Please enter or verify your registered email address.")
                     elif not fp_code:
-                        st.error("Please enter the reset code.")
+                        st.error("Please enter the 6-digit reset code sent to your email.")
                     elif new_pwd != confirm_npwd:
                         st.error("New passwords do not match.")
                     else:
                         ok, msg = reset_password_with_otp(active_email, fp_code, new_pwd)
                         if ok:
                             st.toast(msg, icon="✅")
-                            st.session_state.pop("fp_status", None)
-                            st.session_state.pop("fp_code_field", None)
+                            st.session_state.pop("fp_target_email", None)
                             ok_l, _, u = authenticate_user(active_email, new_pwd)
                             if ok_l and u:
                                 sign_in(u)
@@ -655,52 +735,34 @@ def render_auth_page() -> None:
 
         # Tab 4: Email OTP Sign-in (Passwordless)
         with tab_otp:
-            st.markdown("**Passwordless Sign-In** with a one-time code:")
+            st.markdown("**Passwordless Sign-In** with a real email code:")
             otp_email = st.text_input("Registered Email Address", placeholder="you@example.com", key="otp_login_email")
 
-            if st.button("Send One-Time Code", icon=":material/mail:", width="stretch", key="otp_send_btn"):
-                ok, msg, code, sent_smtp = request_email_login_otp(otp_email)
+            if st.button("Send Sign-In Code via DNS MX", icon=":material/mail:", width="stretch", key="otp_send_btn"):
+                ok, msg = request_email_login_otp(otp_email)
                 if ok:
-                    st.session_state["otp_status"] = {
-                        "email": otp_email.strip().lower(),
-                        "code": code,
-                        "sent_smtp": sent_smtp,
-                    }
-                    if not sent_smtp:
-                        st.session_state["otp_code_field"] = code
-                    st.toast(msg, icon="📬")
+                    st.session_state["otp_target_email"] = otp_email.strip().lower()
+                    st.success(f"📬 {msg}")
+                    st.toast("Sign-in code sent!", icon="📬")
                 else:
                     st.error(msg)
 
-            otp_stat = st.session_state.get("otp_status")
-            if otp_stat and otp_stat.get("email") == otp_email.strip().lower():
-                if otp_stat.get("sent_smtp"):
-                    st.success(f"✅ One-time sign-in code sent to **{otp_stat['email']}**! Check your inbox.")
-                else:
-                    st.markdown(
-                        f"""
-                        <div style="background:rgba(56,189,248,0.12);border:1px solid rgba(56,189,248,0.4);border-radius:12px;padding:12px 16px;margin:10px 0;text-align:center;">
-                          <div style="font-size:0.75rem;font-weight:700;color:#38BDF8;text-transform:uppercase;letter-spacing:0.06em;">📬 One-Time Sign-In Code</div>
-                          <div style="font-size:2rem;font-weight:800;letter-spacing:6px;color:#38BDF8;margin:4px 0;">{otp_stat['code']}</div>
-                          <div style="font-size:0.78rem;color:#c4c9e2;">Generated for <b>{otp_stat['email']}</b> (No .env setup needed). Auto-filled below!</div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
+            otp_target = st.session_state.get("otp_target_email")
+            if otp_target and otp_target == otp_email.strip().lower():
+                st.info(f"📧 A 6-digit sign-in code was sent to **{otp_target}** via DNS MX. Please check your inbox and enter it below:")
 
             with st.form("otp_login_form", border=True):
-                code_entered = st.text_input("6-Digit Login Code", value=st.session_state.get("otp_code_field", ""), placeholder="••••••", max_chars=6)
+                code_entered = st.text_input("6-Digit Login Code", placeholder="••••••", max_chars=6)
                 if st.form_submit_button("Sign In with Code", type="primary", icon=":material/login:", width="stretch"):
                     if not otp_email:
                         st.error("Please enter your registered email address.")
                     elif not code_entered:
-                        st.error("Please enter the 6-digit code.")
+                        st.error("Please enter the 6-digit code sent to your email.")
                     else:
                         ok, msg, user_obj = login_with_email_otp(otp_email, code_entered)
                         if ok and user_obj:
                             st.toast(msg, icon="🎉")
-                            st.session_state.pop("otp_status", None)
-                            st.session_state.pop("otp_code_field", None)
+                            st.session_state.pop("otp_target_email", None)
                             sign_in(user_obj)
                         else:
                             st.error(msg)
