@@ -48,6 +48,29 @@ def esc(text: str) -> str:
             .replace(">", "&gt;").replace('"', "&quot;"))
 
 
+def render_avatar_html(avatar: str, size: int = 42, radius: str = "12px", bg: str | None = None) -> str:
+    """Render an avatar HTML element supporting custom images (data URIs) and emojis."""
+    av = str(avatar or "👤").strip()
+    if av.startswith("data:image/") or av.startswith("http://") or av.startswith("https://"):
+        return (
+            f'<img src="{av}" style="width:{size}px;height:{size}px;border-radius:{radius};'
+            f'object-fit:cover;flex-shrink:0;box-shadow:0 2px 8px rgba(0,0,0,0.25);'
+            f'display:inline-block;vertical-align:middle;" alt="Avatar" />'
+        )
+    try:
+        T = ctx()["T"]
+        default_bg = hex_to_rgba(T["primary"], 0.18)
+    except Exception:
+        default_bg = "rgba(124, 156, 255, 0.18)"
+    actual_bg = bg or default_bg
+    font_sz = max(int(size * 0.48), 12)
+    return (
+        f'<div style="font-size:{font_sz}px;width:{size}px;height:{size}px;border-radius:{radius};'
+        f'background:{actual_bg};display:grid;place-items:center;flex-shrink:0;'
+        f'box-shadow:0 2px 6px rgba(0,0,0,0.15);">{av}</div>'
+    )
+
+
 def hero(title: str, subtitle: str = "") -> None:
     html(f"""
     <div style="margin-bottom:1.1rem">

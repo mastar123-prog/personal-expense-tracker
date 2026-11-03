@@ -106,9 +106,29 @@ def get_theme(name: str | None) -> dict:
 
 
 def hex_to_rgba(hex_color: str, alpha: float) -> str:
-    h = hex_color.lstrip("#")
-    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
-    return f"rgba({r}, {g}, {b}, {alpha})"
+    c = str(hex_color or "").strip()
+    if c.startswith("rgba"):
+        inside = c[c.find("(") + 1 : c.rfind(")")]
+        parts = [p.strip() for p in inside.split(",") if p.strip()]
+        if len(parts) >= 3:
+            return f"rgba({parts[0]}, {parts[1]}, {parts[2]}, {alpha})"
+        return c
+    if c.startswith("rgb"):
+        inside = c[c.find("(") + 1 : c.rfind(")")]
+        parts = [p.strip() for p in inside.split(",") if p.strip()]
+        if len(parts) >= 3:
+            return f"rgba({parts[0]}, {parts[1]}, {parts[2]}, {alpha})"
+        return c
+    h = c.lstrip("#")
+    if len(h) == 3:
+        h = "".join(ch * 2 for ch in h)
+    if len(h) >= 6:
+        try:
+            r, g, b = (int(h[i : i + 2], 16) for i in (0, 2, 4))
+            return f"rgba({r}, {g}, {b}, {alpha})"
+        except Exception:
+            pass
+    return f"rgba(124, 156, 255, {alpha})"
 
 
 # --------------------------------------------------------------------------- native theme

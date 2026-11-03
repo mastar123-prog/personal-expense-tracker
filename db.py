@@ -158,6 +158,25 @@ def init_db() -> None:
                 value TEXT,
                 UNIQUE(user_id, key)
             );
+
+            CREATE TABLE IF NOT EXISTS auth_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL,
+                token_type TEXT NOT NULL,
+                code TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_token_email ON auth_tokens(email, token_type);
+
+            CREATE TABLE IF NOT EXISTS chatroom_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                user_name TEXT NOT NULL,
+                avatar TEXT NOT NULL,
+                message TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             """
         )
 
@@ -707,3 +726,35 @@ def load_demo_data(months: int = 6, user_id: int | None = None) -> int:
                 ],
             )
     return len(rows)
+
+
+# --------------------------------------------------------------------------- chatroom
+def get_chatroom_messages(limit: int = 60) -> list[dict]:
+    with _conn() as con:
+        rows = con.execute(
+            """
+            SELECT id, user_id, user_name, avatar, message, created_at
+            FROM chatroom_messages
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def post_chatroom_message(user_id: int, user_name: str, avatar: str, message: str) -> None:
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with _conn() as con:
+        con.execute(
+            """
+            INSERT INTO chatroom_messages (user_id, user_name, avatar, message, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (user_id, user_name, avatar or "👤", message.strip(), now),
+        )
+
+
+def clear_chatroom_messages() -> None:
+    with _conn() as con:
+        con.execute("DELETE FROM chatroom_messages")

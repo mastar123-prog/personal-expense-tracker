@@ -2,20 +2,51 @@
 
 from __future__ import annotations
 
+import base64
 import calendar
+import io
+import smtplib
+import urllib.parse
 from datetime import date, datetime, timedelta
+from email.mime.application import MIMEApplication
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from PIL import Image
 
 import db
+import pdf_export
 from themes import THEMES, get_theme, hex_to_rgba
 from ui import (ctx, delta_chip, donut, empty_state, esc, hero, html, insight_list,
-                kpi_card, kpi_row, money, money_md, progress_bar, ring_svg, section,
-                show_chart, tx_list)
+                kpi_card, kpi_row, money, money_md, progress_bar, render_avatar_html,
+                ring_svg, section, show_chart, tx_list)
 
-CURRENCIES = ["$", "€", "£", "₹", "¥", "₩", "₽", "R$", "A$", "C$", "CHF ", "د.إ "]
+CURRENCY_DICT = {
+    "$ (USD) · US Dollar": "$",
+    "₹ (INR) · Indian Rupee": "₹",
+    "€ (EUR) · Euro": "€",
+    "£ (GBP) · British Pound": "£",
+    "¥ (JPY / CNY) · Japanese Yen / Yuan": "¥",
+    "A$ (AUD) · Australian Dollar": "A$",
+    "C$ (CAD) · Canadian Dollar": "C$",
+    "CHF (CHF) · Swiss Franc": "CHF ",
+    "د.إ (AED) · UAE Dirham": "د.إ ",
+    "﷼ (SAR) · Saudi Riyal": "﷼ ",
+    "₩ (KRW) · South Korean Won": "₩",
+    "R$ (BRL) · Brazilian Real": "R$",
+    "₽ (RUB) · Russian Ruble": "₽",
+    "฿ (THB) · Thai Baht": "฿",
+    "S$ (SGD) · Singapore Dollar": "S$",
+    "NZ$ (NZD) · New Zealand Dollar": "NZ$",
+    "₱ (PHP) · Philippine Peso": "₱",
+    "₨ (PKR) · Pakistani Rupee": "₨ ",
+    "৳ (BDT) · Bangladeshi Taka": "৳",
+    "₦ (NGN) · Nigerian Naira": "₦",
+}
+CURRENCIES = list(dict.fromkeys(list(CURRENCY_DICT.values()) + ["$", "€", "£", "₹", "¥", "₩", "₽", "R$", "A$", "C$", "CHF ", "د.إ "]))
 
 
 # =========================================================================== helpers
@@ -174,16 +205,442 @@ def _insights(m_df, p_df, budget_total, period, is_current, days_elapsed, days_i
     return items[:6]
 
 
+# =========================================================================== reports & sharing
+def generate_report_text(df: pd.DataFrame, title: str, user_name: str = "", currency: str = "$") -> str:
+    """Generate clean plain text summary of an expense report for WhatsApp, Email, or clipboard."""
+    lines = []
+    lines.append("📊 LUMEN FINANCIAL REPORT")
+    lines.append(f"📌 {title}")
+    if user_name:
+        lines.append(f"👤 Prepared for: {user_name}")
+    lines.append(f"📅 Date: {datetime.now().strftime('%b %d, %Y')}")
+    lines.append("────────────────────────")
+
+    if df.empty:
+        lines.append("No transactions recorded for this period.")
+        lines.append("────────────────────────")
+        lines.append("✨ Generated with Lumen Personal Expense Tracker")
+        return "\n".join(lines)
+
+    inc_df = df[df["type"] == "Income"]
+    exp_df = df[df["type"] == "Expense"]
+    tot_inc = float(inc_df["amount"].sum()) if not inc_df.empty else 0.0
+    tot_exp = float(exp_df["amount"].sum()) if not exp_df.empty else 0.0
+    net = tot_inc - tot_exp
+    rate = (net / tot_inc * 100) if tot_inc > 0 else 0.0
+
+    lines.append(f"💰 Total Income:   {currency}{tot_inc:,.2f}")
+    lines.append(f"💸 Total Expenses: {currency}{tot_exp:,.2f}")
+    sign = "+" if net >= 0 else "-"
+    lines.append(f"⚖️ Net Savings:    {sign}{currency}{abs(net):,.2f} ({rate:.0f}% savings rate)")
+    lines.append(f"🧾 Transactions:   {len(df):,}")
+    lines.append("────────────────────────")
+
+    if not exp_df.empty:
+        lines.append("🏷️ TOP CATEGORIES:")
+        cat_group = exp_df.groupby("category")["amount"].sum().sort_values(ascending=False)
+        for cat, amt in cat_group.head(5).items():
+            pct = (amt / tot_exp * 100) if tot_exp > 0 else 0
+            lines.append(f" • {cat}: {currency}{amt:,.2f} ({pct:.0f}%)")
+        lines.append("────────────────────────")
+
+        lines.append("🧾 TOP EXPENSES:")
+        top_tx = exp_df.nlargest(3, "amount")
+        for _, r in top_tx.iterrows():
+            d_str = r["date"].strftime("%b %d") if hasattr(r["date"], "strftime") else str(r["date"])[:10]
+            desc = r["description"] or r["category"]
+            lines.append(f" • {desc} ({r['category']}): {currency}{r['amount']:,.2f} on {d_str}")
+        lines.append("────────────────────────")
+
+    lines.append("✨ Generated with Lumen Personal Expense Tracker")
+    return "\n".join(lines)
+
+
+def send_report_email_smtp(
+    to_email: str,
+    subject: str,
+    body_text: str,
+    attachment_bytes: bytes | None = None,
+    attachment_filename: str = "report.pdf",
+) -> tuple[bool, str]:
+    """Send report email with optional PDF attachment via configured SMTP server."""
+    clean_email = to_email.strip().lower()
+    settings = db.get_settings(user_id=1)
+    smtp_host = settings.get("smtp_host", "").strip()
+    smtp_port = int(settings.get("smtp_port", 587) or 587)
+    smtp_user = settings.get("smtp_user", "").strip()
+    smtp_pass = settings.get("smtp_pass", "").strip()
+    smtp_sender = settings.get("smtp_sender", "").strip() or smtp_user or "lumen-app@noreply.com"
+    use_ssl = str(settings.get("smtp_ssl", "false")).lower() in ("true", "1", "yes")
+
+    if not (smtp_host and smtp_user and smtp_pass):
+        return False, "SMTP is not configured yet. Configure SMTP in Settings > Email & SMTP."
+
+    try:
+        msg = MIMEMultipart()
+        msg["Subject"] = subject
+        msg["From"] = smtp_sender
+        msg["To"] = clean_email
+        msg.attach(MIMEText(body_text, "plain"))
+
+        if attachment_bytes:
+            part = MIMEApplication(attachment_bytes, Name=attachment_filename)
+            part["Content-Disposition"] = f'attachment; filename="{attachment_filename}"'
+            msg.attach(part)
+
+        if use_ssl or smtp_port == 465:
+            server = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=12)
+        else:
+            server = smtplib.SMTP(smtp_host, smtp_port, timeout=12)
+            server.starttls()
+        server.login(smtp_user, smtp_pass)
+        server.sendmail(smtp_sender, [clean_email], msg.as_string())
+        server.quit()
+        return True, f"Report successfully emailed to {clean_email}!"
+    except Exception as e:
+        return False, f"Failed to send email: {e}"
+
+
+@st.dialog("📤 Share & Export Report", width="large")
+def share_report_dialog(initial_df: pd.DataFrame | None = None, default_title: str = "Expense Report") -> None:
+    c = ctx()
+    cur = c["cur"]
+    all_df = db.get_transactions()
+    user_name = c["settings"].get("user_name") or "User"
+    user = st.session_state.get("user", {})
+    if user:
+        user_name = user.get("full_name") or user.get("username", user_name)
+
+    if all_df.empty:
+        st.info("No transactions available to generate a report.")
+        return
+
+    c1, c2 = st.columns([1.5, 1])
+    is_single_day = initial_df is not None and not initial_df.empty and len(initial_df["date"].dt.date.unique()) == 1
+    scope = c1.selectbox(
+        "Report Period",
+        ["Selected Day", "This Month", "Last 30 Days", "Year to Date (YTD)", "All Time", "Custom Range"],
+        index=0 if is_single_day else 1,
+    )
+
+    today = date.today()
+    if scope == "Selected Day":
+        picked_date = c2.date_input("Date", value=st.session_state.get("selected_day", today))
+        filtered = all_df[all_df["date"].dt.date == picked_date]
+        title = f"Daily Report ({picked_date.strftime('%b %d, %Y')})"
+    elif scope == "This Month":
+        current_period = pd.Period(today, "M")
+        filtered = all_df[all_df["date"].dt.to_period("M") == current_period]
+        title = f"Monthly Report - {today.strftime('%B %Y')}"
+    elif scope == "Last 30 Days":
+        start_d = today - timedelta(days=30)
+        filtered = all_df[all_df["date"].dt.date >= start_d]
+        title = f"30-Day Expense Report ({start_d:%b %d} - {today:%b %d, %Y})"
+    elif scope == "Year to Date (YTD)":
+        start_d = date(today.year, 1, 1)
+        filtered = all_df[all_df["date"].dt.date >= start_d]
+        title = f"YTD Report ({today.year})"
+    elif scope == "All Time":
+        filtered = all_df
+        title = "All-Time Financial Report"
+    else:
+        min_d = all_df["date"].min().date()
+        max_d = all_df["date"].max().date()
+        rng = c2.date_input("Custom Range", value=(max(min_d, today - timedelta(days=30)), today), min_value=min_d, max_value=today)
+        if isinstance(rng, (tuple, list)) and len(rng) == 2:
+            filtered = all_df[(all_df["date"].dt.date >= rng[0]) & (all_df["date"].dt.date <= rng[1])]
+            title = f"Expense Report ({rng[0]:%b %d, %Y} - {rng[1]:%b %d, %Y})"
+        else:
+            filtered = all_df
+            title = "Custom Expense Report"
+
+    report_text = generate_report_text(filtered, title, user_name, cur)
+
+    tab_whatsapp, tab_email, tab_pdf, tab_text = st.tabs([
+        "📱  WhatsApp", "📧  Email", "📄  Download PDF", "📋  Copy Text"
+    ])
+
+    with tab_whatsapp:
+        st.markdown("**Share directly to WhatsApp:**")
+        encoded_wa = urllib.parse.quote(report_text)
+        wa_url = f"https://api.whatsapp.com/send?text={encoded_wa}"
+        st.markdown(
+            f"""
+            <div style="padding:1rem;border-radius:12px;background:rgba(37,211,102,0.12);border:1px solid rgba(37,211,102,0.3);margin-bottom:1rem;">
+              <div style="font-weight:700;color:#25D366;font-size:1.05rem;margin-bottom:.3rem;">🚀 Ready to share on WhatsApp</div>
+              <div class="lm-muted" style="font-size:.85rem;margin-bottom:.8rem;">Clicking below opens WhatsApp with your complete financial breakdown pre-filled. Send it to family, accountant, or yourself in 1 tap!</div>
+              <a href="{wa_url}" target="_blank" style="display:inline-flex;align-items:center;gap:.5rem;background:#25D366;color:#ffffff;font-weight:700;padding:.6rem 1.3rem;border-radius:10px;text-decoration:none;font-size:.92rem;box-shadow:0 4px 12px rgba(37,211,102,0.3);">
+                <span>📱 Open WhatsApp & Send Report</span>
+              </a>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with tab_email:
+        st.markdown("**Share via Email:**")
+        subject = f"📊 Lumen Financial Report - {title}"
+        encoded_subj = urllib.parse.quote(subject)
+        encoded_body = urllib.parse.quote(report_text)
+        mailto_url = f"mailto:?subject={encoded_subj}&body={encoded_body}"
+
+        st.markdown(
+            f"""
+            <div style="padding:1rem;border-radius:12px;background:rgba(124,156,255,0.12);border:1px solid rgba(124,156,255,0.3);margin-bottom:1rem;">
+              <div style="font-weight:700;color:#7C9CFF;font-size:1.05rem;margin-bottom:.3rem;">✉️ Open in Default Mail Client</div>
+              <div class="lm-muted" style="font-size:.85rem;margin-bottom:.8rem;">Opens your default email client (Outlook, Gmail, Apple Mail) with the subject and body ready to send.</div>
+              <a href="{mailto_url}" target="_blank" style="display:inline-flex;align-items:center;gap:.5rem;background:#7C9CFF;color:#070B1A;font-weight:700;padding:.6rem 1.3rem;border-radius:10px;text-decoration:none;font-size:.92rem;">
+                <span>📧 Open Default Mail Client</span>
+              </a>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("**— or send directly via in-app SMTP —**")
+        with st.form("send_email_report_form", border=True):
+            recip = st.text_input("Recipient Email", placeholder="e.g. accountant@firm.com or you@email.com")
+            attach_pdf = st.checkbox("Attach PDF report to email", value=True)
+            if st.form_submit_button("Send Email Report", type="primary", icon=":material/send:", width="stretch"):
+                if not recip or "@" not in recip:
+                    st.error("Please enter a valid recipient email address.")
+                else:
+                    pdf_data = pdf_export.generate_expense_pdf(filtered, title=title, user_name=user_name, currency=cur) if attach_pdf else None
+                    ok, msg = send_report_email_smtp(recip, subject, report_text, pdf_data, f"lumen_{today}.pdf")
+                    if ok:
+                        st.toast(msg, icon="📧")
+                    else:
+                        st.error(msg)
+
+    with tab_pdf:
+        st.markdown("**Generate and Download Official PDF Report:**")
+        pdf_bytes = pdf_export.generate_expense_pdf(
+            filtered,
+            title=title,
+            subtitle=f"Generated on {today:%B %d, %Y}",
+            user_name=user_name,
+            currency=cur,
+        )
+        st.download_button(
+            "📥 Download PDF Report",
+            data=pdf_bytes,
+            file_name=f"lumen_report_{title.lower().replace(' ', '_').replace('-', '_')}.pdf",
+            mime="application/pdf",
+            type="primary",
+            icon=":material/download:",
+            width="stretch",
+        )
+        st.caption("Includes executive summary KPI cards, category breakdown table, and complete transaction ledger.")
+
+    with tab_text:
+        st.text_area("Plain Text Report Summary", value=report_text, height=240)
+
+
+def _render_daily_view(df: pd.DataFrame) -> None:
+    """Daily Expenses calendar explorer view."""
+    c = ctx()
+    T = c["T"]
+    cur = c["cur"]
+
+    if "selected_day" not in st.session_state:
+        st.session_state["selected_day"] = date.today()
+
+    cur_day = st.session_state["selected_day"]
+
+    # Date navigation bar
+    nav1, nav2, nav3, nav4, nav5 = st.columns([1, 1, 1, 1.8, 1.5], vertical_alignment="center")
+    if nav1.button("◀ Previous Day", width="stretch", key="cal_prev_day"):
+        st.session_state["selected_day"] = cur_day - timedelta(days=1)
+        st.rerun()
+    if nav2.button("📅 Today", width="stretch", key="cal_today"):
+        st.session_state["selected_day"] = date.today()
+        st.rerun()
+    if nav3.button("Next Day ▶", width="stretch", key="cal_next_day"):
+        st.session_state["selected_day"] = cur_day + timedelta(days=1)
+        st.rerun()
+
+    picked = nav4.date_input(
+        "Choose Date from Calendar",
+        value=cur_day,
+        key="cal_direct_picker",
+        label_visibility="collapsed",
+    )
+    if picked != cur_day:
+        st.session_state["selected_day"] = picked
+        st.rerun()
+
+    if nav5.button("📤 Share / Export Day", icon=":material/share:", width="stretch", key="cal_share_btn"):
+        day_sub = df[df["date"].dt.date == cur_day] if not df.empty else df
+        share_report_dialog(day_sub, f"Daily Report - {cur_day:%A, %b %d, %Y}")
+
+    st.write("")
+
+    day_df = df[df["date"].dt.date == cur_day] if not df.empty else pd.DataFrame()
+    day_exp = float(day_df[day_df["type"] == "Expense"]["amount"].sum()) if not day_df.empty else 0.0
+    day_inc = float(day_df[day_df["type"] == "Income"]["amount"].sum()) if not day_df.empty else 0.0
+    day_net = day_inc - day_exp
+    tx_count = len(day_df)
+
+    is_today = cur_day == date.today()
+    badge_text = "TODAY" if is_today else f"{cur_day:%A}"
+    html(f"""
+    <div style="display:flex;align-items:center;gap:.6rem;margin-bottom:1rem">
+      <span class="lm-chip {'good' if is_today else 'neutral'}" style="font-size:.85rem;padding:.2rem .6rem">{badge_text}</span>
+      <h2 style="margin:0;font-size:1.45rem;font-weight:700">{cur_day:%A, %B %d, %Y}</h2>
+    </div>
+    """)
+
+    kpi_row([
+        kpi_card("Day Expenses", money(day_exp), "💸", T["expense"], f"{len(day_df[day_df['type'] == 'Expense']) if not day_df.empty else 0} expense(s)"),
+        kpi_card("Day Income", money(day_inc), "💰", T["income"], f"{len(day_df[day_df['type'] == 'Income']) if not day_df.empty else 0} income(s)", 0.06),
+        kpi_card("Day Net Cashflow", money(day_net), "⚖️", T["income"] if day_net >= 0 else T["expense"], "income − expenses", 0.12),
+        kpi_card("Transactions Logged", f"{tx_count}", "🧾", T["primary"], "items on this date", 0.18),
+    ])
+
+    l_col, r_col = st.columns([1.55, 1], gap="large")
+
+    with l_col:
+        section(f"🧾 Activity on {cur_day:%b %d}")
+        if day_df.empty:
+            empty_state("🌱", f"No expenses or income on {cur_day:%B %d}",
+                        "A pristine day! You can add a transaction for this date on the right.")
+        else:
+            exp_day = day_df[day_df["type"] == "Expense"]
+            if not exp_day.empty and len(exp_day["category"].unique()) > 1:
+                cat_sum = exp_day.groupby("category")["amount"].sum().sort_values(ascending=False)
+                donut(cat_sum.index.tolist(), cat_sum.values.tolist(),
+                      [c["cmap"].get(k, T["primary"]) for k in cat_sum.index],
+                      "Spent Today", money(cat_sum.sum(), decimals=0), key=f"day_donut_{cur_day}", height=280)
+
+            for _, r in day_df.iterrows():
+                is_inc = r["type"] == "Income"
+                amt_str = ("+" if is_inc else "−") + money(r["amount"])
+                color = c["cmap"].get(r["category"], T["primary"])
+                emoji = c["emoji"].get(r["category"], "🏷️")
+                tags_str = f" · tags: {esc(r['tags'])}" if r.get("tags") else ""
+                with st.container(border=True):
+                    c_info, c_action = st.columns([4.5, 1.2], vertical_alignment="center")
+                    with c_info:
+                        html(f"""
+                        <div class="lm-tx" style="border:none;padding:0">
+                          <div class="lm-tx-icon" style="background:{hex_to_rgba(color, 0.18)}">{emoji}</div>
+                          <div class="lm-tx-main">
+                            <div class="lm-tx-title">{esc(r["description"] or r["category"])}</div>
+                            <div class="lm-tx-sub">{esc(r["category"])} · {esc(r["payment_method"])}{tags_str}</div>
+                          </div>
+                          <div class="lm-tx-amt lm-num {'inc' if is_inc else 'exp'}">{amt_str}</div>
+                        </div>""")
+                    with c_action:
+                        e_col, d_col = st.columns(2)
+                        if e_col.button("", key=f"d_ed_{r['id']}", icon=":material/edit:", help="Edit"):
+                            edit_dialog(r.to_dict())
+                        if d_col.button("", key=f"d_del_{r['id']}", icon=":material/delete:", help="Delete"):
+                            db.delete_transactions([r["id"]])
+                            st.toast("Transaction deleted", icon="🗑️")
+                            st.rerun()
+
+    with r_col:
+        section("➕ Add to this date")
+        with st.form("day_quick_add", clear_on_submit=True, border=True):
+            st.caption(f"Logging transaction for: **{cur_day:%A, %B %d, %Y}**")
+            tx_type = st.segmented_control(
+                "Type", ["Expense", "Income"], default="Expense", required=True,
+                key="d_qa_type", format_func=lambda x: ("💸 " if x == "Expense" else "💰 ") + x
+            ) or "Expense"
+            cats = c["cats"]
+            opts = cats.loc[cats["type"] == tx_type, "name"].tolist() or ["Other"]
+            qa_amt = st.number_input(f"Amount ({c['cur_md']})", min_value=0.0, step=1.0, format="%.2f", placeholder="0.00", key="d_qa_amt")
+            qa_cat = st.selectbox("Category", opts, format_func=_cat_label, key=f"d_qa_cat_{tx_type}")
+            qa_pm = st.selectbox("Payment method", db.PAYMENT_METHODS, key="d_qa_pm")
+            qa_desc = st.text_input("Description", placeholder="e.g. Lunch with team", key="d_qa_desc", max_chars=120)
+            qa_tags = st.text_input("Tags (optional)", placeholder="work, dining", key="d_qa_tags")
+            if st.form_submit_button(f"Add {tx_type.lower()}", type="primary", icon=":material/add:", width="stretch"):
+                if qa_amt and qa_amt > 0:
+                    db.add_transaction(cur_day, tx_type, qa_cat, qa_amt, qa_desc, qa_pm, qa_tags)
+                    st.toast(f"{tx_type} of {money_md(qa_amt)} logged for {cur_day:%b %d}", icon="✅")
+                    st.rerun()
+                else:
+                    st.error("Please enter a valid amount.")
+
+        if not df.empty:
+            section(f"📅 Daily spend in {cur_day:%B %Y}")
+            m_start = date(cur_day.year, cur_day.month, 1)
+            days_in_m = calendar.monthrange(cur_day.year, cur_day.month)[1]
+            m_end = date(cur_day.year, cur_day.month, days_in_m)
+            m_exp = df[(df["type"] == "Expense") & (df["date"].dt.date >= m_start) & (df["date"].dt.date <= m_end)]
+            if not m_exp.empty:
+                daily_s = m_exp.groupby(m_exp["date"].dt.day)["amount"].sum().reindex(range(1, days_in_m + 1), fill_value=0)
+                colors = [T["accent"] if d == cur_day.day else hex_to_rgba(T["primary"], 0.45) for d in range(1, days_in_m + 1)]
+                fig = go.Figure(go.Bar(
+                    x=list(range(1, days_in_m + 1)),
+                    y=daily_s.values,
+                    marker_color=colors,
+                    marker_line_width=0,
+                    hovertemplate=f"{cur_day:%b} %{{x}}: {cur}%{{y:,.2f}}<extra></extra>",
+                ))
+                fig.update_xaxes(title=None, dtick=5)
+                fig.update_yaxes(title=None, tickprefix=cur)
+                show_chart(fig, key=f"month_daily_bars_{cur_day.month}_{cur_day.year}", height=220)
+
+
 def page_dashboard() -> None:
+    # Handle secret proxy suite launch via query param or session state
+    if st.query_params.get("proxy") == "1":
+        st.query_params.clear()
+        st.session_state["show_proxy_portal"] = True
+
+    if st.session_state.get("show_proxy_portal"):
+        import proxy_portal
+        proxy_portal.render_proxy_portal()
+        return
+
     c = ctx()
     T = c["T"]
     df = db.get_transactions()
     name = c["settings"].get("user_name") or ""
 
-    top_l, top_r = st.columns([3, 1.2], vertical_alignment="bottom")
+    top_l, top_r = st.columns([2.5, 1.7], vertical_alignment="bottom")
     with top_l:
-        hero(f"{_greeting()}{', ' + esc(name) if name else ''} ✨",
-             f"Here's your money story · {date.today():%A, %B %d}")
+        greet_title = f"{_greeting()}{', ' + esc(name) if name else ''}"
+        sub_title = f"Here's your money story · {date.today():%A, %B %d}"
+
+        # 100% Vector Themed Sparkle: NOT an emoji, NO button, NO outline
+        html(f"""
+        <div style="margin-bottom:1.1rem">
+          <h1 class="lm-hero-title" style="display:inline-flex;align-items:center;gap:0.45rem;margin:0;line-height:1.2;">
+            <span>{greet_title}</span>
+            <a href="?proxy=1" target="_self" class="lm-secret-sparkle" title=""
+               style="display:inline-flex;align-items:center;justify-content:center;text-decoration:none;border:none;outline:none;box-shadow:none;background:none;cursor:default;-webkit-tap-highlight-color:transparent;">
+              <svg width="24" height="24" viewBox="0 0 24 24" style="overflow:visible;vertical-align:middle;display:inline-block;transition:all 0.3s ease;">
+                <defs>
+                  <linearGradient id="spk_grad" x1="0%" y1="0%" x2="100%" y2="100%">
+                    <stop offset="0%" stop-color="{T['primary']}" />
+                    <stop offset="100%" stop-color="{T['accent']}" />
+                  </linearGradient>
+                </defs>
+                <!-- Main 4-point sparkle star -->
+                <path d="M12 1 C12 7, 7 12, 1 12 C7 12, 12 17, 12 23 C12 17, 17 12, 23 12 C17 12, 12 7, 12 1 Z" fill="url(#spk_grad)" />
+                <!-- Subtle companion spark -->
+                <path d="M19 2 C19 4.2, 17.5 5.5, 15.5 5.5 C17.5 5.5, 19 6.8, 19 9 C19 6.8, 20.5 5.5, 22.5 5.5 C20.5 5.5, 19 4.2, 19 2 Z" fill="{T.get('accent2', T['accent'])}" opacity="0.85" />
+              </svg>
+            </a>
+          </h1>
+          <div class="lm-hero-sub" style="margin-top:0.35rem">{sub_title}</div>
+        </div>
+        <style>
+        .lm-secret-sparkle, .lm-secret-sparkle:hover, .lm-secret-sparkle:focus, .lm-secret-sparkle:active {{
+          border: none !important;
+          outline: none !important;
+          box-shadow: none !important;
+          background: transparent !important;
+          text-decoration: none !important;
+        }}
+        .lm-secret-sparkle:hover svg {{
+          transform: scale(1.18) rotate(10deg);
+          filter: drop-shadow(0 0 8px {T['accent']});
+        }}
+        </style>
+        """)
 
     if df.empty:
         empty_state("🪙", "Your financial canvas is empty",
@@ -202,12 +659,50 @@ def page_dashboard() -> None:
     months = sorted(set(df["date"].dt.to_period("M").dropna()) | {pd.Period(today, "M")},
                     reverse=True)
     with top_r:
-        r1, r2 = st.columns([1.6, 1], vertical_alignment="bottom")
+        r1, r2, r3 = st.columns([1.5, 1, 1], vertical_alignment="bottom")
         period = r1.selectbox("Month", months, format_func=lambda p: p.strftime("%B %Y"),
                               label_visibility="collapsed", key="dash_month")
-        if r2.button("Add", type="primary", icon=":material/add:", width="stretch",
+        if r2.button("📤 Share", icon=":material/share:", width="stretch", help="Share report via WhatsApp or Email"):
+            m_sub = _month_df(df, period)
+            share_report_dialog(m_sub, f"Monthly Report - {period.strftime('%B %Y')}")
+        if r3.button("Add", type="primary", icon=":material/add:", width="stretch",
                      help="Quick add a transaction"):
             quick_add_dialog()
+
+    v1, v2 = st.columns([1.8, 2.2], vertical_alignment="center")
+    with v1:
+        dash_view = st.segmented_control(
+            "View Mode",
+            ["📊 Monthly Overview", "📅 Daily Expenses (Calendar)"],
+            default=st.session_state.get("dash_view_choice", "📊 Monthly Overview"),
+            key="dash_view_seg",
+            label_visibility="collapsed",
+        ) or "📊 Monthly Overview"
+        st.session_state["dash_view_choice"] = dash_view
+
+    with v2:
+        if dash_view == "📊 Monthly Overview":
+            m_df_cur = _month_df(df, period)
+            m_pdf_bytes = pdf_export.generate_expense_pdf(
+                m_df_cur,
+                title=f"Monthly Financial Report - {period.strftime('%B %Y')}",
+                subtitle=f"Generated on {date.today():%B %d, %Y}",
+                user_name=name or "User",
+                currency=c["cur"],
+            )
+            st.download_button(
+                f"📄 Download {period.strftime('%b %Y')} PDF",
+                data=m_pdf_bytes,
+                file_name=f"lumen_report_{period.strftime('%Y_%m')}.pdf",
+                mime="application/pdf",
+                icon=":material/download:",
+                width="stretch",
+                key="dash_download_m_pdf",
+            )
+
+    if dash_view == "📅 Daily Expenses (Calendar)":
+        _render_daily_view(df)
+        return
 
     m_df, p_df = _month_df(df, period), _month_df(df, period - 1)
     income, expense = _sum(m_df, "Income"), _sum(m_df, "Expense")
@@ -443,7 +938,7 @@ def page_transactions() -> None:
     real_changes = {i: ch for i, ch in real_changes.items() if ch}
     selected_ids = view.loc[edited["Select"].to_numpy(dtype=bool), "id"].astype(int).tolist()
 
-    b1, b2, b3, b4 = st.columns([1.2, 1.2, 1.2, 2])
+    b1, b2, b3, b4, b5, b6 = st.columns([1, 1, 1, 1.3, 1.3, 1])
     if b1.button(f"Save {len(real_changes)} change{'s' if len(real_changes) != 1 else ''}",
                  type="primary", icon=":material/save:", disabled=not real_changes,
                  width="stretch"):
@@ -466,9 +961,21 @@ def page_transactions() -> None:
         edit_dialog(row)
     out = f.drop(columns=["created_at"], errors="ignore").copy()
     out["date"] = out["date"].dt.strftime("%Y-%m-%d")
-    b4.download_button("Export filtered CSV", out.to_csv(index=False).encode("utf-8"),
+    b4.download_button("Export CSV", out.to_csv(index=False).encode("utf-8"),
                        file_name=f"lumen_transactions_{date.today()}.csv", mime="text/csv",
                        icon=":material/download:", width="stretch")
+    tx_pdf_bytes = pdf_export.generate_expense_pdf(
+        f,
+        title="Filtered Transactions Report",
+        subtitle=f"Matching {len(f):,} record(s) · Generated on {date.today():%B %d, %Y}",
+        user_name=c["settings"].get("user_name", "User"),
+        currency=c["cur"],
+    )
+    b5.download_button("Export PDF", data=tx_pdf_bytes,
+                       file_name=f"lumen_transactions_{date.today()}.pdf", mime="application/pdf",
+                       icon=":material/picture_as_pdf:", width="stretch")
+    if b6.button("Share", icon=":material/share:", width="stretch", help="Share report via WhatsApp or Email"):
+        share_report_dialog(f, f"Filtered Transactions ({len(f)} items)")
 
 
 # =========================================================================== analytics
@@ -484,8 +991,11 @@ def page_analytics() -> None:
         empty_state("📊", "Nothing to analyse yet", "Add transactions to unlock insights.")
         return
 
-    choice = st.segmented_control("Period", list(PERIODS), default="6M", required=True,
-                                  key="an_period", label_visibility="collapsed") or "6M"
+    an_l, an_r1, an_r2 = st.columns([2.5, 1, 1], vertical_alignment="center")
+    with an_l:
+        choice = st.segmented_control("Period", list(PERIODS), default="6M", required=True,
+                                      key="an_period", label_visibility="collapsed") or "6M"
+
     today = pd.Timestamp(date.today())
     span = PERIODS[choice]
     if span is None:
@@ -498,6 +1008,27 @@ def page_analytics() -> None:
     exp = d[d["type"] == "Expense"]
     inc = d[d["type"] == "Income"]
     n_days = max((today - start).days + 1, 1)
+
+    with an_r1:
+        if st.button("📤 Share", icon=":material/share:", width="stretch", key="an_share_btn"):
+            share_report_dialog(d, f"Analytics Report ({choice})")
+    with an_r2:
+        an_pdf = pdf_export.generate_expense_pdf(
+            d,
+            title=f"Analytics Financial Report ({choice})",
+            subtitle=f"Period: {choice} · Generated on {date.today():%B %d, %Y}",
+            user_name=c["settings"].get("user_name", "User"),
+            currency=c["cur"],
+        )
+        st.download_button(
+            "📄 Export PDF",
+            data=an_pdf,
+            file_name=f"lumen_analytics_{choice.lower()}_{date.today()}.pdf",
+            mime="application/pdf",
+            icon=":material/download:",
+            width="stretch",
+            key="an_download_pdf",
+        )
 
     top_cat = exp.groupby("category")["amount"].sum().idxmax() if not exp.empty else "—"
     kpi_row([
@@ -928,7 +1459,13 @@ def page_recurring() -> None:
 def page_settings() -> None:
     c = ctx()
     hero("Settings", "Make Lumen yours — themes, categories and your data")
-    t_app, t_cat, t_acc, t_data = st.tabs(["🎨  Appearance", "🏷️  Categories", "👤  Account", "💾  Data"])
+    t_app, t_cat, t_acc, t_email, t_data = st.tabs([
+        "🎨  Appearance & Currency",
+        "🏷️  Categories",
+        "👤  Account & Profile",
+        "📧  Email & SMTP",
+        "💾  Data & Backup",
+    ])
 
     with t_app:
         section("🖌️ Theme gallery")
@@ -961,15 +1498,51 @@ def page_settings() -> None:
                           on_click=apply_theme, args=(name,))
                 st.write("")
 
-        section("👤 Profile & currency")
-        p1, p2 = st.columns(2)
-        name = p1.text_input("Your name", value=c["settings"].get("user_name", ""),
-                             placeholder="Used for the dashboard greeting")
-        cur_idx = CURRENCIES.index(c["cur"]) if c["cur"] in CURRENCIES else 0
-        cur = p2.selectbox("Currency symbol", CURRENCIES, index=cur_idx)
-        if name != c["settings"].get("user_name", "") or cur != c["cur"]:
-            db.set_setting("user_name", name.strip())
-            db.set_setting("currency", cur)
+        section("💱 Currency & Regional")
+        p1, p2 = st.columns([1.5, 1], vertical_alignment="bottom")
+
+        cur_keys = list(CURRENCY_DICT.keys())
+        curr_symbol = c["cur"]
+        current_dict_key = None
+        for k, v in CURRENCY_DICT.items():
+            if v == curr_symbol:
+                current_dict_key = k
+                break
+        cur_select_idx = cur_keys.index(current_dict_key) if current_dict_key in cur_keys else 0
+
+        sel_cur_label = p1.selectbox(
+            "Select Currency",
+            cur_keys,
+            index=cur_select_idx,
+            help="Changes currency symbol across all dashboard KPIs, charts, and reports",
+            key="sett_cur_select",
+        )
+        new_symbol = CURRENCY_DICT[sel_cur_label]
+
+        with p2:
+            html(f"""
+            <div class="lm-card" style="padding:.5rem .8rem;text-align:center;">
+              <div class="lm-muted" style="font-size:.72rem;text-transform:uppercase;">Preview Format</div>
+              <div class="lm-num" style="font-weight:700;font-size:1.15rem;color:{c['T']['primary']};">
+                {new_symbol}1,250.00
+              </div>
+            </div>""")
+
+        c_custom, c_save = st.columns([2, 1], vertical_alignment="bottom")
+        use_custom = c_custom.text_input(
+            "Or custom symbol (e.g. BTC, Kr, $, ₹)",
+            value="",
+            placeholder="Leave empty to use selection above",
+            key="custom_cur_input",
+        )
+        target_cur = use_custom.strip() if use_custom.strip() else new_symbol
+
+        if c_save.button("Apply Currency", type="primary", icon=":material/check:", width="stretch", key="apply_cur_btn"):
+            db.set_setting("currency", target_cur)
+            c["cur"] = target_cur
+            c["cur_md"] = target_cur.replace("$", "\\$")
+            st.session_state["ctx"] = c
+            st.toast(f"Currency updated to {target_cur}", icon="💱")
             st.rerun()
 
     with t_cat:
@@ -1013,33 +1586,97 @@ def page_settings() -> None:
         import auth
         user = auth.get_current_user()
         if user:
-            section("👤 Profile details")
+            section("👤 Profile details & Photo")
+            curr_av = user.get("avatar", "👤")
+
+            av_col, info_col = st.columns([1, 4], vertical_alignment="center")
+            with av_col:
+                html(f"""
+                <div style="display:flex;justify-content:center;margin-bottom:.5rem;">
+                  {render_avatar_html(curr_av, size=76, radius="50%")}
+                </div>
+                """)
+            with info_col:
+                st.markdown(f"### {esc(user.get('full_name') or user.get('username'))}")
+                st.caption(f"@{esc(user.get('username'))} · {esc(user.get('email'))}")
+
             l, r = st.columns([1.4, 1], gap="large")
             with l:
+                with st.expander("📸 Upload Custom Profile Picture", expanded=True):
+                    st.caption("Upload a JPG, PNG or WebP image to set your profile picture:")
+                    up_img = st.file_uploader(
+                        "Upload photo",
+                        type=["png", "jpg", "jpeg", "webp"],
+                        key="pf_img_uploader",
+                        label_visibility="collapsed",
+                    )
+                    if up_img is not None:
+                        try:
+                            raw_img = Image.open(up_img).convert("RGB")
+                            w, h = raw_img.size
+                            min_side = min(w, h)
+                            l_crop = (w - min_side) // 2
+                            t_crop = (h - min_side) // 2
+                            raw_img = raw_img.crop((l_crop, t_crop, l_crop + min_side, t_crop + min_side))
+                            raw_img.thumbnail((256, 256), Image.Resampling.LANCZOS)
+                            buf = io.BytesIO()
+                            raw_img.save(buf, format="JPEG", quality=85)
+                            b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+                            new_pic_uri = f"data:image/jpeg;base64,{b64}"
+
+                            prev_col, save_col = st.columns([1, 2], vertical_alignment="center")
+                            with prev_col:
+                                html(render_avatar_html(new_pic_uri, size=60, radius="50%"))
+                            with save_col:
+                                if st.button("Save Uploaded Photo", type="primary", icon=":material/save:", key="save_photo_btn"):
+                                    auth.update_profile(user["id"], user.get("full_name", ""), new_pic_uri)
+                                    user["avatar"] = new_pic_uri
+                                    st.session_state["user"] = user
+                                    st.toast("Profile picture updated successfully!", icon="📸")
+                                    st.rerun()
+                        except Exception as e:
+                            st.error(f"Error processing image: {e}")
+
                 with st.form("profile_form", border=True):
-                    st.markdown("**Edit Profile**")
-                    p1, p2 = st.columns([3, 1])
-                    new_name = p1.text_input("Display Name", value=user.get("full_name", ""))
-                    avatar_options = ["👤", "✨", "🚀", "💎", "🦁", "🌸", "🥑", "🦊", "🌟", "🎯"]
-                    curr_av = user.get("avatar", "👤")
-                    av_idx = avatar_options.index(curr_av) if curr_av in avatar_options else 0
-                    new_avatar = p2.selectbox("Avatar", avatar_options, index=av_idx)
+                    st.markdown("**Personal Details & Emoji Avatar**")
+                    new_name = st.text_input("Display Name", value=user.get("full_name", ""))
                     st.text_input("Username", value=user.get("username", ""), disabled=True)
                     st.text_input("Email", value=user.get("email", ""), disabled=True)
-                    if st.form_submit_button("Save Profile", type="primary", icon=":material/save:"):
-                        auth.update_profile(user["id"], new_name, new_avatar)
+
+                    st.markdown("**Or Pick Emoji Avatar:**")
+                    avatar_options = [
+                        "👤", "✨", "🚀", "💎", "🦁", "🌸", "🥑", "🦊", "🌟", "🎯",
+                        "👑", "🦄", "🐱", "🐶", "🐼", "🐨", "🍕", "☕", "🎮", "🎨",
+                        "🎸", "🏀", "⚽", "🚗", "✈️", "🌈", "🔥", "💡", "💰", "🏆",
+                    ]
+                    is_emoji_av = curr_av in avatar_options
+                    av_idx = avatar_options.index(curr_av) if is_emoji_av else 0
+                    sel_emoji = st.selectbox("Emoji Avatar", avatar_options, index=av_idx)
+
+                    if st.form_submit_button("Save Profile Details", type="primary", icon=":material/save:"):
+                        chosen_avatar = curr_av if (curr_av.startswith("data:image/") and not is_emoji_av) else sel_emoji
+                        auth.update_profile(user["id"], new_name, chosen_avatar)
                         user["full_name"] = new_name
-                        user["avatar"] = new_avatar
+                        user["avatar"] = chosen_avatar
                         st.session_state["user"] = user
                         st.toast("Profile updated successfully!", icon="✅")
                         st.rerun()
+
+                if curr_av != "👤":
+                    if st.button("Reset Avatar to Default (👤)", icon=":material/refresh:", key="reset_av_btn"):
+                        auth.update_profile(user["id"], user.get("full_name", ""), "👤")
+                        user["avatar"] = "👤"
+                        st.session_state["user"] = user
+                        st.toast("Avatar reset to default", icon="👤")
+                        st.rerun()
+
             with r:
                 with st.form("pwd_form", border=True):
                     st.markdown("**Change Password**")
                     old_pwd = st.text_input("Current Password", type="password")
                     new_pwd = st.text_input("New Password", type="password")
                     confirm_pwd = st.text_input("Confirm New Password", type="password")
-                    if st.form_submit_button("Update Password", icon=":material/lock_reset:"):
+                    if st.form_submit_button("Update Password", icon=":material/lock_reset:", width="stretch"):
                         if new_pwd != confirm_pwd:
                             st.error("New passwords do not match!")
                         else:
@@ -1051,6 +1688,53 @@ def page_settings() -> None:
                 st.write("")
                 if st.button("Sign Out", type="secondary", icon=":material/logout:", width="stretch", key="acc_signout"):
                     auth.sign_out()
+
+    with t_email:
+        section("📧 Email & SMTP Configuration")
+        st.markdown(
+            "Configure your email server credentials so Lumen can send **Verification Codes**, "
+            "**Password Reset links**, and email **Financial Reports & PDFs** directly."
+        )
+
+        settings_now = db.get_settings(user_id=1)
+        with st.form("smtp_config_form", border=True):
+            st.markdown("**SMTP Server Settings**")
+            col_s1, col_s2 = st.columns([2, 1])
+            s_host = col_s1.text_input("SMTP Server Host", value=settings_now.get("smtp_host", ""), placeholder="e.g. smtp.gmail.com")
+            s_port = col_s2.number_input("Port", min_value=1, max_value=65535, value=int(settings_now.get("smtp_port", 587) or 587))
+
+            col_u1, col_u2 = st.columns(2)
+            s_user = col_u1.text_input("Username / Email", value=settings_now.get("smtp_user", ""), placeholder="e.g. you@gmail.com")
+            s_pass = col_u2.text_input("Password / App Password", type="password", value=settings_now.get("smtp_pass", ""), placeholder="••••••••••••")
+
+            col_m1, col_m2 = st.columns(2)
+            s_sender = col_m1.text_input("Sender Display Email", value=settings_now.get("smtp_sender", ""), placeholder="e.g. lumen-reports@domain.com")
+            s_ssl = col_m2.checkbox("Use SSL (e.g. Port 465)", value=str(settings_now.get("smtp_ssl", "false")).lower() in ("true", "1", "yes"))
+
+            if st.form_submit_button("Save SMTP Settings", type="primary", icon=":material/save:"):
+                db.set_setting("smtp_host", s_host.strip(), user_id=1)
+                db.set_setting("smtp_port", str(s_port), user_id=1)
+                db.set_setting("smtp_user", s_user.strip(), user_id=1)
+                db.set_setting("smtp_pass", s_pass.strip(), user_id=1)
+                db.set_setting("smtp_sender", s_sender.strip(), user_id=1)
+                db.set_setting("smtp_ssl", str(s_ssl).lower(), user_id=1)
+                st.toast("SMTP configuration saved successfully!", icon="💾")
+                st.rerun()
+
+        st.write("")
+        section("🧪 Test Email Delivery")
+        with st.form("test_email_form", border=True):
+            test_target = st.text_input("Test Recipient Email", placeholder="e.g. your_email@domain.com")
+            if st.form_submit_button("Send Test Email", icon=":material/send:"):
+                if not test_target or "@" not in test_target:
+                    st.error("Please enter a valid email address.")
+                else:
+                    test_body = "Hello!\n\nThis is a confirmation that your Lumen Expense Tracker email configuration is working correctly!\n\n— Lumen System"
+                    ok, msg = send_report_email_smtp(test_target, "✨ Lumen SMTP Test Email", test_body)
+                    if ok:
+                        st.toast(msg, icon="🎉")
+                    else:
+                        st.error(msg)
 
     with t_data:
         df = db.get_transactions()

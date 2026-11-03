@@ -15,7 +15,7 @@ import auth
 import db
 import views
 from themes import THEMES, build_css, get_theme, hex_to_rgba, logo_svg, sync_native_theme
-from ui import esc, html, money, progress_bar
+from ui import esc, html, money, progress_bar, render_avatar_html
 
 st.set_page_config(
     page_title="Lumen · Personal Expense Tracker",
@@ -129,9 +129,10 @@ with st.sidebar:
     u_avatar = user.get("avatar", "👤")
     u_handle = user.get("username", "")
 
+    avatar_html = render_avatar_html(u_avatar, size=42, radius="12px")
     html(f"""
     <div class="lm-card" style="padding:.75rem .9rem;margin:.2rem 0 .7rem;display:flex;align-items:center;gap:.75rem">
-      <div style="font-size:1.55rem;width:42px;height:42px;border-radius:12px;background:{hex_to_rgba(T['primary'], 0.18)};display:grid;place-items:center;flex-shrink:0">{u_avatar}</div>
+      {avatar_html}
       <div style="flex:1;min-width:0">
         <div style="font-weight:700;font-size:.95rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{esc(u_name)}</div>
         <div class="lm-muted" style="font-size:.78rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">@{esc(u_handle)}</div>
