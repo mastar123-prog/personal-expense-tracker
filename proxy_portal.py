@@ -6,10 +6,13 @@ Accessible via the secret '✨' sparkle on the home greeting.
 from __future__ import annotations
 
 import html
+import http.server
 import math
 import os
 import re
 import socket
+import threading
+import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import Any
@@ -32,6 +35,148 @@ def _get_session_val(key: str, default: Any = None) -> Any:
         return st.session_state.get(key, default)
     except Exception:
         return default
+
+
+# ----------------------------------------------------------------------------- Local HTTP Proxy Server
+_PROXY_SERVER: http.server.ThreadingHTTPServer | None = None
+_PROXY_PORT: int = 8585
+
+
+class OrbitProxyHandler(http.server.BaseHTTPRequestHandler):
+    """Local streaming proxy engine that completely strips CSP, X-Frame-Options, and frame busters."""
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.end_headers()
+
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/proxy":
+            qs = urllib.parse.parse_qs(parsed.query)
+            target_url = qs.get("url", [""])[0]
+            if not target_url:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b"Missing target url parameter")
+                return
+
+            if not target_url.startswith(("http://", "https://")):
+                target_url = "https://" + target_url
+
+            try:
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    "Accept": self.headers.get("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+                    "Accept-Language": "en-US,en;q=0.9",
+                }
+                resp = requests.get(target_url, headers=headers, timeout=14, verify=False, allow_redirects=True)
+
+                self.send_response(resp.status_code)
+                content_type = resp.headers.get("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Type", content_type)
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Methods", "*")
+                self.send_header("Access-Control-Allow-Headers", "*")
+                # Do NOT output X-Frame-Options or CSP headers
+                self.end_headers()
+
+                body = resp.content
+                if "text/html" in content_type:
+                    raw_html = resp.text
+                    raw_html = re.sub(r'<meta[^>]*http-equiv=["\']?Content-Security-Policy["\']?[^>]*>', "", raw_html, flags=re.I)
+                    raw_html = re.sub(r'<meta[^>]*http-equiv=["\']?X-Frame-Options["\']?[^>]*>', "", raw_html, flags=re.I)
+                    raw_html = re.sub(r'<base\s+[^>]*>', "", raw_html, flags=re.I)
+
+                    parsed_target = urllib.parse.urlparse(target_url)
+                    base_url = f"{parsed_target.scheme}://{parsed_target.netloc}"
+
+                    bridge = f"""
+                    <base href="{base_url}/">
+                    <script>
+                      (function() {{
+                        try {{
+                          Object.defineProperty(window, 'top', {{ get: function() {{ return window.self; }} }});
+                          Object.defineProperty(window, 'parent', {{ get: function() {{ return window.self; }} }});
+                          Object.defineProperty(window, 'frameElement', {{ get: function() {{ return null; }} }});
+                        }} catch(e) {{}}
+                        
+                        document.addEventListener('click', function(e) {{
+                          var a = e.target.closest('a');
+                          if (!a || !a.href) return;
+                          var h = a.getAttribute('href');
+                          if (!h || h.startsWith('javascript:') || h.startsWith('#')) return;
+                          if (a.target === '_blank') return;
+                          
+                          var fullUrl = a.href;
+                          if (!fullUrl.includes('/proxy?url=')) {{
+                            e.preventDefault();
+                            e.stopPropagation();
+                            window.location.href = 'http://127.0.0.1:{_PROXY_PORT}/proxy?url=' + encodeURIComponent(fullUrl);
+                          }}
+                        }}, true);
+
+                        document.addEventListener('submit', function(e) {{
+                          var form = e.target;
+                          if (!form || !form.action) return;
+                          var act = form.action;
+                          if (!act.includes('/proxy?url=')) {{
+                            form.action = 'http://127.0.0.1:{_PROXY_PORT}/proxy?url=' + encodeURIComponent(act);
+                          }}
+                        }}, true);
+                      }})();
+                    </script>
+                    """
+                    injected_html = bridge + raw_html
+                    injected_html = re.sub(r"\btop\.location\b", "window._disabled_top", injected_html)
+                    injected_html = re.sub(r"\bparent\.location\b", "window._disabled_top", injected_html)
+                    injected_html = re.sub(r"\bwindow\.top\b", "window.self", injected_html)
+                    injected_html = re.sub(r"top\s*!==\s*self", "false", injected_html)
+                    injected_html = re.sub(r"top\s*!=\s*self", "false", injected_html)
+                    injected_html = re.sub(r"self\s*!==\s*top", "false", injected_html)
+
+                    body = injected_html.encode("utf-8", errors="ignore")
+
+                self.wfile.write(body)
+            except Exception as e:
+                self.send_response(502)
+                self.end_headers()
+                self.wfile.write(f"Proxy stream error: {e}".encode("utf-8"))
+        else:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(b"Lumen Orbit Local Proxy Active")
+
+    def log_message(self, format, *args):
+        pass
+
+
+def _ensure_local_proxy_running(port: int = 8585) -> int:
+    """Ensure background proxy server is alive on localhost and return the active port."""
+    global _PROXY_SERVER, _PROXY_PORT
+    if _PROXY_SERVER is not None:
+        return _PROXY_PORT
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        if s.connect_ex(("127.0.0.1", port)) == 0:
+            _PROXY_PORT = port
+            return port
+
+    for p in (port, 8586, 8587, 8588):
+        try:
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", p), OrbitProxyHandler)
+            t = threading.Thread(target=server.serve_forever, daemon=True)
+            t.start()
+            _PROXY_SERVER = server
+            _PROXY_PORT = p
+            return p
+        except Exception:
+            continue
+    return port
 
 
 # ----------------------------------------------------------------------------- Beam AI Engine
@@ -595,61 +740,22 @@ def render_proxy_portal() -> None:
 
         # --------------------------------------------------------------------- Mode 1: Smart Direct Stream
         if mode == "⚡ Smart Web Proxy (Direct Stream - Bypasses Header Blocks)":
-            with st.spinner(f"Unblocking and streaming {active_url}..."):
-                try:
-                    headers = {
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                        "Accept-Language": "en-US,en;q=0.9",
-                    }
-                    resp = requests.get(active_url, headers=headers, timeout=14, verify=False, allow_redirects=True)
-                    resp.encoding = resp.apparent_encoding or "utf-8"
-                    raw_html = resp.text
-
-                    # Strip meta tags that block iframes or enforce restrictive CSP
-                    raw_html = re.sub(r'<meta[^>]*http-equiv=["\']?Content-Security-Policy["\']?[^>]*>', "", raw_html, flags=re.I)
-                    raw_html = re.sub(r'<meta[^>]*http-equiv=["\']?X-Frame-Options["\']?[^>]*>', "", raw_html, flags=re.I)
-
-                    # Remove existing base tags and inject our base href without target="_blank"
-                    raw_html = re.sub(r'<base\s+[^>]*>', '', raw_html, flags=re.I)
-                    parsed = urlparse(active_url)
-                    base_url = f"{parsed.scheme}://{parsed.netloc}"
-                    interactive_bridge = f"""
-                    <base href="{base_url}/">
-                    <script>
-                      // Lumen Orbit Interactive Bridge
-                      try {{
-                        window.top = window.self;
-                        window.parent = window.self;
-                      }} catch(e) {{}}
-                    </script>
-                    """
-                    injected_html = interactive_bridge + raw_html
-
-                    # Strip frame busting scripts
-                    injected_html = re.sub(r"\btop\.location\b", "window._disabled_top", injected_html)
-                    injected_html = re.sub(r"\bparent\.location\b", "window._disabled_top", injected_html)
-                    injected_html = re.sub(r"\bwindow\.top\b", "window.self", injected_html)
-                    injected_html = re.sub(r"top\s*!==\s*self", "false", injected_html)
-                    injected_html = re.sub(r"top\s*!=\s*self", "false", injected_html)
-                    injected_html = re.sub(r"self\s*!==\s*top", "false", injected_html)
-
-                    st.components.v1.html(injected_html, height=frame_height, scrolling=True)
-                except Exception as e:
-                    st.warning(f"Direct stream could not load {active_url}: {e}")
-                    st.info("💡 Falling back to Universal Clean Reader below:")
-                    reader_url = f"https://r.jina.ai/{active_url}"
-                    st.markdown(
-                        f"""
-                        <iframe src="{esc(reader_url)}"
-                                style="width:100%;height:{frame_height}px;border:1px solid {hex_to_rgba(T['primary'], 0.3)};border-radius:12px;background:#ffffff;"
-                                sandbox="{iframe_sandbox}"
-                                allow="{iframe_allow}"
-                                loading="lazy">
-                        </iframe>
-                        """,
-                        unsafe_allow_html=True,
-                    )
+            proxy_port = _ensure_local_proxy_running(8585)
+            proxy_url = f"http://127.0.0.1:{proxy_port}/proxy?url={quote(active_url, safe='')}"
+            st.markdown(
+                f"""
+                <div style="margin-top:8px;border-radius:12px;overflow:hidden;border:1px solid {hex_to_rgba(T['primary'], 0.35)};box-shadow:0 8px 24px rgba(0,0,0,0.3);">
+                  <iframe src="{esc(proxy_url)}"
+                          style="width:100%;height:{frame_height}px;border:none;background:#ffffff;"
+                          sandbox="{iframe_sandbox}"
+                          allow="{iframe_allow}"
+                          loading="lazy">
+                  </iframe>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.caption("⚡ **Local Proxy Engine Active**: All headers (CSP, X-Frame-Options) stripped on-the-fly. Games, navigation, and interactive buttons execute seamlessly.")
 
         # --------------------------------------------------------------------- Mode 2: Universal Web Reader
         elif mode == "📖 Universal Web Reader (Bypasses 100% of Iframe Blocks)":
