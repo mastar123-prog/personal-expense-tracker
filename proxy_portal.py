@@ -10,6 +10,7 @@ import math
 import os
 import re
 import socket
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import Any
 from urllib.parse import quote, urlparse
@@ -123,20 +124,157 @@ def _get_finance_snapshot(user_id: int | None = None) -> str:
         return f"📊 *Unable to load financial snapshot at this moment: {e}*"
 
 
+def _clean_html_tags(raw: str) -> str:
+    """Remove HTML tags and decode HTML entities."""
+    if not raw:
+        return ""
+    cleaned = re.sub(r"<[^>]+>", "", raw)
+    return html.unescape(cleaned).strip()
+
+
+def _search_web(query: str, max_results: int = 5) -> dict[str, Any]:
+    """Execute live multi-source web search across Wikipedia, Google Web RSS, and HN Algolia."""
+    clean_q = re.sub(r"^(search for|search|look up|google|find|browse|web search)\s+", "", query, flags=re.I).strip(" ?.")
+    if not clean_q:
+        clean_q = query.strip()
+
+    results: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+
+    # 1. Wikipedia Search API (Authoritative encyclopedia knowledge)
+    try:
+        w_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={quote(clean_q)}&utf8=&format=json&srlimit=3"
+        w_res = requests.get(w_url, headers=headers, timeout=6)
+        if w_res.status_code == 200:
+            for it in w_res.json().get("query", {}).get("search", []):
+                t = it.get("title", "")
+                sn = _clean_html_tags(it.get("snippet", ""))
+                u = f"https://en.wikipedia.org/wiki/{quote(t.replace(' ', '_'))}"
+                if u not in seen_urls and t:
+                    seen_urls.add(u)
+                    results.append({
+                        "source": "Wikipedia",
+                        "title": t,
+                        "snippet": sn,
+                        "url": u,
+                        "icon": "📚",
+                    })
+    except Exception:
+        pass
+
+    # 2. Google News & Web RSS (Live news, web articles, media coverage)
+    try:
+        g_url = f"https://news.google.com/rss/search?q={quote(clean_q)}&hl=en-US&gl=US&ceid=US:en"
+        g_res = requests.get(g_url, headers=headers, timeout=6)
+        if g_res.status_code == 200:
+            root = ET.fromstring(g_res.text)
+            for it in root.findall(".//item")[:4]:
+                t = it.find("title").text if it.find("title") is not None else ""
+                l = it.find("link").text if it.find("link") is not None else ""
+                if l and l not in seen_urls and t:
+                    seen_urls.add(l)
+                    results.append({
+                        "source": "Google Web",
+                        "title": _clean_html_tags(t),
+                        "snippet": f"Recent coverage and web updates on '{clean_q}'.",
+                        "url": l,
+                        "icon": "🌐",
+                    })
+    except Exception:
+        pass
+
+    # 3. Hacker News Algolia Search (Tech, tools, web applications)
+    if len(results) < max_results:
+        try:
+            hn_url = f"https://hn.algolia.com/api/v1/search?query={quote(clean_q)}&hitsPerPage=3"
+            hn_res = requests.get(hn_url, headers=headers, timeout=5)
+            if hn_res.status_code == 200:
+                for hit in hn_res.json().get("hits", []):
+                    t = hit.get("title") or hit.get("story_title")
+                    u = hit.get("url") or f"https://news.ycombinator.com/item?id={hit.get('objectID')}"
+                    if u and u not in seen_urls and t:
+                        seen_urls.add(u)
+                        results.append({
+                            "source": "Tech & Web",
+                            "title": _clean_html_tags(t),
+                            "snippet": "Community discussion and web project on Hacker News.",
+                            "url": u,
+                            "icon": "📰",
+                        })
+        except Exception:
+            pass
+
+    return {"query": clean_q, "results": results[:max_results]}
+
+
+def _format_search_response(search_data: dict[str, Any]) -> str:
+    """Format structured search results with one-click Orbit Proxy launchers."""
+    q = search_data["query"]
+    items = search_data.get("results", [])
+    if not items:
+        return (
+            f"🔍 **Live Web Search: *'{q}'***\n\n"
+            f"No direct web results could be retrieved right now. "
+            f"You can search directly inside the **'Web Proxy'** tab using [DuckDuckGo](https://html.duckduckgo.com/html/) or Wikipedia!"
+        )
+
+    lines = [
+        f"🔍 **Live Web Search Results for: *'{q}'***\n",
+        f"Found {len(items)} top resources across live web sources:\n",
+    ]
+    for i, it in enumerate(items, 1):
+        icon = it.get("icon", "🌐")
+        title = it.get("title", "Resource")
+        src = it.get("source", "Web")
+        sn = it.get("snippet", "")
+        u = it.get("url", "")
+        proxy_href = f"?proxy_url={quote(u, safe='')}"
+
+        lines.append(
+            f"**{i}. {icon} [{title}]({u})**  \n"
+            f"*{src}* — {sn}  \n"
+            f"👉 [🌐 Open in Orbit Web Proxy]({proxy_href}) &nbsp;|&nbsp; [Direct Link ↗]({u})\n"
+        )
+
+    lines.append(
+        "\n💡 *Tip: Click 'Open in Orbit Web Proxy' on any result to stream and interact with it inside Orbit!*"
+    )
+    return "\n".join(lines)
+
+
 def _beam_respond(prompt: str, user_id: int | None = None) -> str:
-    """Generate intelligent, accurate responses using live cloud AI, local database, or built-in knowledge."""
+    """Generate intelligent, accurate responses using live search, AI, local database, or built-in knowledge."""
     p_lower = prompt.lower().strip()
 
-    # 1. Financial analysis from local SQLite database
+    # 1. Explicit or Mode-based Web Search
+    is_search_intent = (
+        p_lower.startswith(("/search", "search ", "search for ", "find ", "look up ", "google ", "web search ", "browse "))
+        or _get_session_val("beam_search_mode", False)
+    )
+    if is_search_intent:
+        search_data = _search_web(prompt)
+        return _format_search_response(search_data)
+
+    # 2. Financial analysis from local SQLite database
     if any(k in p_lower for k in ("my expense", "my spending", "how much did i spend", "my budget", "my balance", "my money", "financial snapshot", "analyze my", "spending summary")):
         return _get_finance_snapshot(user_id)
 
-    # 2. Math evaluation
+    # 3. Math evaluation
     math_ans = _try_eval_math(prompt)
     if math_ans:
         return math_ans
 
-    # 3. Optional Gemini API integration (if user entered key or set in environment)
+    # 4. Question-based web search intent (who is, what is, where is, etc.)
+    if any(p_lower.startswith(q) for q in ("who is ", "who was ", "what is ", "what was ", "where is ", "when was ", "tell me about ", "latest news", "news on ", "find me ")):
+        search_data = _search_web(prompt)
+        if search_data.get("results"):
+            return _format_search_response(search_data)
+
+    # 5. Optional Gemini API integration (if user entered key or set in environment)
     gemini_key = _get_session_val("beam_gemini_api_key") or os.environ.get("GEMINI_API_KEY", "")
     if gemini_key:
         try:
@@ -151,7 +289,7 @@ def _beam_respond(prompt: str, user_id: int | None = None) -> str:
         except Exception:
             pass
 
-    # 4. Live Cloud AI completion via Pollinations (Fast, free, reliable, no auth required)
+    # 6. Live Cloud AI completion via Pollinations (Fast, free, reliable, no auth required)
     try:
         url = "https://text.pollinations.ai/"
         payload = {
@@ -161,7 +299,7 @@ def _beam_respond(prompt: str, user_id: int | None = None) -> str:
                     "content": (
                         "You are Beam, an intelligent, helpful, and concise AI companion inside the Lumen Orbit "
                         "Proxy Suite. Provide direct, informative, well-structured answers using Markdown. "
-                        "Help users with web proxying, coding, math, general science, trivia, and finance."
+                        "Help users with web search, coding, math, general science, trivia, and finance."
                     ),
                 },
                 {"role": "user", "content": prompt},
@@ -171,53 +309,25 @@ def _beam_respond(prompt: str, user_id: int | None = None) -> str:
         }
         res = requests.post(url, json=payload, timeout=7)
         if res.status_code == 200 and res.text.strip():
-            # Return high quality live AI response
             return res.text.strip()
     except Exception:
         pass
 
-    # 5. Live DuckDuckGo Instant Answer / Knowledge Lookup
+    # 7. Live Web Search fallback before offline templates
     try:
-        ddg_url = f"https://api.duckduckgo.com/?q={quote(prompt)}&format=json&no_html=1&skip_disambig=1"
-        d_res = requests.get(ddg_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
-        if d_res.status_code == 200:
-            data = d_res.json()
-            ans = data.get("Answer", "").strip()
-            abstract = data.get("AbstractText", "").strip()
-            heading = data.get("Heading", "Search Insight")
-            source_url = data.get("AbstractURL", "")
-            if ans:
-                return f"⚡ **Beam Answer**: {ans}"
-            if abstract:
-                src_link = f"\n\n🔗 [Read more on {data.get('AbstractSource', 'Web')}]({source_url})" if source_url else ""
-                return f"📖 **{heading}**:\n\n{abstract}{src_link}"
+        search_data = _search_web(prompt)
+        if search_data.get("results"):
+            return _format_search_response(search_data)
     except Exception:
         pass
 
-    # 6. Live Wikipedia REST API Summary
-    try:
-        clean_q = re.sub(r"^(what is|who is|tell me about|explain|search for)\s+", "", prompt, flags=re.I).strip(" ?.")
-        if clean_q and len(clean_q) >= 3:
-            wiki_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{quote(clean_q.title().replace(' ', '_'))}"
-            w_res = requests.get(wiki_url, headers={"User-Agent": "LumenOrbit/1.0"}, timeout=5)
-            if w_res.status_code == 200:
-                w_data = w_res.json()
-                extract = w_data.get("extract", "").strip()
-                title = w_data.get("title", clean_q)
-                page_url = w_data.get("content_urls", {}).get("desktop", {}).get("page", "")
-                if extract:
-                    link_part = f"\n\n🔗 [Open full article on Wikipedia]({page_url})" if page_url else ""
-                    return f"📚 **{title}** (Wikipedia Summary):\n\n{extract}{link_part}"
-    except Exception:
-        pass
-
-    # 7. Comprehensive Offline Knowledge & Conversational Engine
-    # Web proxy, unblocking, iframes, games
-    if any(w in p_lower for w in ("proxy", "unblock", "website", "browse", "filter", "iframe", "refused to connect", "csp", "translate.goog")):
+    # 8. Comprehensive Offline Knowledge & Conversational Engine
+    # Technical proxy & header issues (targeted check, does not hijack search queries)
+    if any(w in p_lower for w in ("how does the proxy work", "how does a proxy work", "refused to connect", "csp header", "frame-ancestors", "x-frame-options", "why does a site block")):
         return (
             "🌐 **Why 'Refused to Connect' Happens & How Orbit Solves It**:\n\n"
-            "1. **Why `translate.goog` or Sites Refuse to Connect**:\n"
-            "   Google Translate (`*.translate.goog`), Poki, and bank sites send HTTP response headers:\n"
+            "1. **Why Sites Refuse to Connect**:\n"
+            "   High-security sites like Google Translate (`*.translate.goog`), Poki, or banks send HTTP response headers:\n"
             "   - `X-Frame-Options: SAMEORIGIN`\n"
             "   - `Content-Security-Policy: frame-ancestors ...`\n"
             "   When loaded directly in an iframe, the browser enforces these headers and refuses to connect.\n\n"
@@ -302,6 +412,19 @@ def render_proxy_portal() -> None:
     user = st.session_state.get("user", {})
     user_name = user.get("full_name") or user.get("username", "Explorer")
     avatar = user.get("avatar", "👤")
+
+    # Check if a search result or query param requested a specific proxy target
+    qp_proxy = st.query_params.get("proxy_url")
+    if qp_proxy:
+        st.session_state["proxy_target_url"] = qp_proxy
+        st.session_state["proxy_active_url"] = qp_proxy
+        st.session_state["proxy_input_val"] = qp_proxy
+        st.session_state["proxy_mode_sel"] = "⚡ Smart Web Proxy (Direct Stream - Bypasses Header Blocks)"
+        hist = st.session_state.get("proxy_history", [])
+        if not hist or hist[-1] != qp_proxy:
+            hist.append(qp_proxy)
+            st.session_state["proxy_history"] = hist
+        st.query_params.clear()
 
     # Header Bar
     top_col1, top_col2 = st.columns([5, 1.2], vertical_alignment="center")
@@ -764,27 +887,35 @@ def render_proxy_portal() -> None:
             ]
 
         # Action bar & Engine status
-        b_top1, b_top2 = st.columns([4, 1.2], vertical_alignment="center")
+        b_top1, b_top2, b_top3 = st.columns([2.8, 1.4, 0.8], vertical_alignment="center")
         with b_top1:
             st.markdown(
                 f"""
                 <div style="font-size:.82rem;color:{T['text']};display:flex;align-items:center;gap:.5rem;">
                   <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#10B981;"></span>
-                  <span>Engine: <b>Live Cloud AI + SQLite Intelligence + Safe Math Evaluator</b></span>
+                  <span>Engine: <b>Live Web Search + Cloud AI + SQLite Intelligence</b></span>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
         with b_top2:
-            if st.button("🧹 Clear Chat", icon=":material/refresh:", width="stretch", key="clear_beam_btn"):
+            s_mode = st.toggle(
+                "🔍 Web Search Mode",
+                value=st.session_state.get("beam_search_mode", False),
+                key="beam_search_toggle",
+                help="When enabled, Beam performs live multi-source web searches for every query",
+            )
+            st.session_state["beam_search_mode"] = s_mode
+        with b_top3:
+            if st.button("🧹 Clear", icon=":material/refresh:", width="stretch", key="clear_beam_btn"):
                 st.session_state["beam_chat_messages"] = [
-                    {"role": "assistant", "content": "⚡ Memory reset. What would you like to ask or calculate?"}
+                    {"role": "assistant", "content": "⚡ Memory reset. What would you like to search, ask, or calculate?"}
                 ]
                 st.rerun()
 
         # Settings and quick prompt expander
-        with st.expander("⚙️ AI Settings & Suggested Quick Prompts", expanded=False):
-            st.caption("Optionally connect your personal Gemini API key or click a quick prompt below:")
+        with st.expander("⚙️ AI Settings & Suggested Quick Searches", expanded=False):
+            st.caption("Optionally connect your personal Gemini API key or click a quick search prompt below:")
             k_col1, k_col2 = st.columns([3.5, 1.5], vertical_alignment="bottom")
             curr_gem_key = st.session_state.get("beam_gemini_api_key", os.environ.get("GEMINI_API_KEY", ""))
             new_key = k_col1.text_input("Gemini API Key (Optional)", value=curr_gem_key, type="password", key="beam_key_input")
@@ -793,7 +924,7 @@ def render_proxy_portal() -> None:
                 st.toast("Key updated for Beam!", icon="🔑")
 
             st.write("")
-            st.markdown("<div style='font-size:0.8rem;font-weight:600;color:#8B93B5;'>SUGGESTED PROMPTS:</div>", unsafe_allow_html=True)
+            st.markdown("<div style='font-size:0.8rem;font-weight:600;color:#8B93B5;'>SUGGESTED SEARCHES & PROMPTS:</div>", unsafe_allow_html=True)
             p_cols = st.columns(4)
 
             def _send_quick_prompt(qp: str) -> None:
@@ -802,14 +933,14 @@ def render_proxy_portal() -> None:
                 st.session_state["beam_chat_messages"].append({"role": "assistant", "content": rep})
                 st.rerun()
 
-            if p_cols[0].button("📊 My Expenses", width="stretch", key="qp_exp"):
+            if p_cols[0].button("🔍 Search: Poki", width="stretch", key="qp_search_poki", help="Search the web for Poki games"):
+                _send_quick_prompt("search Poki games online")
+            if p_cols[1].button("🔍 Search: Savings", width="stretch", key="qp_search_save", help="Search best high-yield savings"):
+                _send_quick_prompt("search best high yield savings accounts")
+            if p_cols[2].button("📊 My Expenses", width="stretch", key="qp_exp", help="Analyze personal finances"):
                 _send_quick_prompt("What are my total expenses and top spending categories?")
-            if p_cols[1].button("🌐 Web Proxying", width="stretch", key="qp_prox"):
-                _send_quick_prompt("How does the web proxy bypass CSP and X-Frame-Options headers?")
-            if p_cols[2].button("🧮 20% of $450", width="stretch", key="qp_math"):
+            if p_cols[3].button("🧮 20% of $450", width="stretch", key="qp_math", help="Calculate math"):
                 _send_quick_prompt("What is 20% of 450?")
-            if p_cols[3].button("🎮 Unblocked Games", width="stretch", key="qp_games"):
-                _send_quick_prompt("How can I play unblocked games like Poki in Orbit?")
 
         # Chat display container
         beam_box = st.container(height=460, border=True)
@@ -821,7 +952,13 @@ def render_proxy_portal() -> None:
                     st.markdown(m["content"])
 
         # Chat prompt input
-        user_prompt = st.chat_input("Ask Beam anything, calculate math, or ask about your expenses...", key="beam_user_input")
+        search_active = st.session_state.get("beam_search_mode", False)
+        prompt_placeholder = (
+            "🔍 Search the live web (e.g. 'search Poki games' or 'what is inflation')..."
+            if search_active
+            else "Ask Beam anything, search the web ('search ...'), or ask about your expenses..."
+        )
+        user_prompt = st.chat_input(prompt_placeholder, key="beam_user_input")
         if user_prompt:
             st.session_state["beam_chat_messages"].append({"role": "user", "content": user_prompt})
             ai_reply = _beam_respond(user_prompt, user_id=user.get("id", 1))
