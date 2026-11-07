@@ -213,17 +213,20 @@ def _beam_respond(prompt: str, user_id: int | None = None) -> str:
 
     # 7. Comprehensive Offline Knowledge & Conversational Engine
     # Web proxy, unblocking, iframes, games
-    if any(w in p_lower for w in ("proxy", "unblock", "website", "browse", "filter", "iframe", "refused to connect", "csp")):
+    if any(w in p_lower for w in ("proxy", "unblock", "website", "browse", "filter", "iframe", "refused to connect", "csp", "translate.goog")):
         return (
-            "🌐 **How Web Proxying & Header Bypassing Works**:\n\n"
-            "1. **Why Sites 'Refuse to Connect'**:\n"
-            "   High-security sites like Poki, Google, or YouTube send the HTTP response header `X-Frame-Options: SAMEORIGIN` "
-            "   and CSP `frame-ancestors 'self'`. When a browser sees these headers inside an `<iframe>`, it blocks rendering.\n\n"
-            "2. **How Orbit Unblocks It**:\n"
-            "   - **🌐 Interactive Web Gateway**: Strips restrictive security headers and dynamically proxies child links, allowing full interaction, clicking, and gaming!\n"
-            "   - **⚡ Smart Direct Stream**: Fetches the raw HTML via server-side Python, injects `<base href>`, removes frame-busting JavaScript (`top.location`), and streams it.\n"
-            "   - **📖 Clean Reader**: Strips all scripts and renders pure, distraction-free text.\n\n"
-            "💡 *Tip: For full interactive navigation with games like Poki, use the **'Interactive Web Gateway'** engine!*"
+            "🌐 **Why 'Refused to Connect' Happens & How Orbit Solves It**:\n\n"
+            "1. **Why `translate.goog` or Sites Refuse to Connect**:\n"
+            "   Google Translate (`*.translate.goog`), Poki, and bank sites send HTTP response headers:\n"
+            "   - `X-Frame-Options: SAMEORIGIN`\n"
+            "   - `Content-Security-Policy: frame-ancestors ...`\n"
+            "   When loaded directly in an iframe, the browser enforces these headers and refuses to connect.\n\n"
+            "2. **The Working Solution: ⚡ Smart Web Proxy (Direct Stream)**:\n"
+            "   - Our Python engine fetches the target site server-side.\n"
+            "   - Strips all `X-Frame-Options`, CSP, and frame-busting scripts.\n"
+            "   - Injects `<base href>` so CSS, images, and links resolve seamlessly.\n"
+            "   - Serves the unblocked page locally with zero header restrictions!\n\n"
+            "💡 *Tip: Ensure the Proxy Engine is set to **'⚡ Smart Web Proxy (Direct Stream)'**.*"
         )
 
     # Poki / Games queries
@@ -340,15 +343,23 @@ def render_proxy_portal() -> None:
         section("🌐 Interactive Web Proxy & Unblocker")
         st.caption("Browse web pages, unblock filtered sites, play games, and interact freely inside Lumen:")
 
+        # Track navigation history
+        if "proxy_history" not in st.session_state:
+            st.session_state["proxy_history"] = []
+
         # Quick preset buttons (Games + Tools)
         st.markdown("<div style='font-size:0.8rem;font-weight:600;margin-bottom:6px;color:#8B93B5;'>⚡ QUICK LAUNCH PRESETS:</div>", unsafe_allow_html=True)
         preset_cols = st.columns(6)
 
-        def _set_preset(u: str, eng: str = "🌐 Interactive Web Gateway (Google Proxy - Full Clicks & Games)") -> None:
+        def _set_preset(u: str, eng: str = "⚡ Smart Web Proxy (Direct Stream - Bypasses Header Blocks)") -> None:
             st.session_state["proxy_target_url"] = u
             st.session_state["proxy_active_url"] = u
             st.session_state["proxy_input_val"] = u
             st.session_state["proxy_mode_sel"] = eng
+            hist = st.session_state.get("proxy_history", [])
+            if not hist or hist[-1] != u:
+                hist.append(u)
+                st.session_state["proxy_history"] = hist
             st.rerun()
 
         if preset_cols[0].button("🎮 Poki Games", width="stretch", key="ps_poki", help="Interactive Poki Games Portal"):
@@ -364,10 +375,14 @@ def render_proxy_portal() -> None:
         if preset_cols[5].button("💡 DynDNS Blog", width="stretch", key="ps_dyndns", help="Free-DynDNS Proxy Gateway"):
             _set_preset("https://blog.free-dyndns.org/")
 
-        default_target = st.session_state.get("proxy_target_url", "https://poki.com")
+        default_target = st.session_state.get("proxy_target_url", "https://blog.free-dyndns.org/")
         active_current = st.session_state.get("proxy_active_url", default_target)
         if "proxy_input_val" not in st.session_state:
             st.session_state["proxy_input_val"] = active_current
+
+        # Ensure active_url is in history
+        if not st.session_state["proxy_history"]:
+            st.session_state["proxy_history"] = [active_current]
 
         # Navigation Bar Form
         with st.form("proxy_nav_bar_form", border=False):
@@ -375,13 +390,13 @@ def render_proxy_portal() -> None:
             url_input = u_col1.text_input(
                 "Target Website URL",
                 value=st.session_state["proxy_input_val"],
-                placeholder="e.g. https://poki.com or https://en.wikipedia.org",
+                placeholder="e.g. https://blog.free-dyndns.org/ or https://poki.com",
                 key="proxy_url_input_box",
             )
             modes = [
-                "🌐 Interactive Web Gateway (Google Proxy - Full Clicks & Games)",
-                "⚡ Smart Direct Stream (Bypasses Frame & Header Blocks)",
+                "⚡ Smart Web Proxy (Direct Stream - Bypasses Header Blocks)",
                 "📖 Universal Web Reader (Bypasses 100% of Iframe Blocks)",
+                "🎮 Playable Web Games (Arcade Hub)",
                 "🛡️ Multi-Proxy Mirror Launcher",
             ]
             current_mode = st.session_state.get("proxy_mode_sel", modes[0])
@@ -396,6 +411,10 @@ def render_proxy_portal() -> None:
                 st.session_state["proxy_target_url"] = clean_target
                 st.session_state["proxy_active_url"] = clean_target
                 st.session_state["proxy_input_val"] = clean_target
+                hist = st.session_state.get("proxy_history", [])
+                if not hist or hist[-1] != clean_target:
+                    hist.append(clean_target)
+                    st.session_state["proxy_history"] = hist
                 st.rerun()
 
         active_url = st.session_state.get("proxy_active_url", default_target).strip()
@@ -403,7 +422,7 @@ def render_proxy_portal() -> None:
             active_url = "https://" + active_url
 
         # Proxy toolbar & interactive controls
-        tb_col1, tb_col2 = st.columns([3.2, 2.8], vertical_alignment="center")
+        tb_col1, tb_col2 = st.columns([3.0, 3.0], vertical_alignment="center")
         with tb_col1:
             st.markdown(
                 f"""
@@ -416,41 +435,43 @@ def render_proxy_portal() -> None:
                 unsafe_allow_html=True,
             )
         with tb_col2:
-            m1, m2, m3, m4 = st.columns(4)
+            hist = st.session_state.get("proxy_history", [])
+            has_back = len(hist) > 1
+            is_theater = st.session_state.get("proxy_theater_mode", False)
+
+            if has_back:
+                m0, m1, m2, m3, m4 = st.columns([1, 1, 1.2, 1, 1])
+                with m0:
+                    if st.button("⬅️ Back", width="stretch", key="proxy_back_btn", help="Go back to previous page"):
+                        hist.pop()  # remove current
+                        prev_u = hist[-1]
+                        st.session_state["proxy_target_url"] = prev_u
+                        st.session_state["proxy_active_url"] = prev_u
+                        st.session_state["proxy_input_val"] = prev_u
+                        st.session_state["proxy_history"] = hist
+                        st.rerun()
+            else:
+                m1, m2, m3, m4 = st.columns(4)
+
             with m1:
                 if st.button("🔄 Reload", width="stretch", key="proxy_reload_btn", help="Reload the proxied window"):
                     st.rerun()
             with m2:
-                st.link_button("↗ Popout", active_url, width="stretch", help="Open directly in a new browser tab")
+                th_label = "🗗 Standard" if is_theater else "⛶ Theater"
+                if st.button(th_label, width="stretch", key="proxy_theater_btn", help="Toggle expanded view height"):
+                    st.session_state["proxy_theater_mode"] = not is_theater
+                    st.rerun()
             with m3:
-                st.link_button("🛡️ 12ft", f"https://12ft.io/{active_url}", width="stretch", help="Unblock with 12ft ladder")
+                st.link_button("↗ Popout", active_url, width="stretch", help="Open directly in a new browser tab")
             with m4:
-                st.link_button("📚 Archive", f"https://web.archive.org/web/{active_url}", width="stretch", help="Open Wayback Machine mirror")
+                st.link_button("🛡️ 12ft", f"https://12ft.io/{active_url}", width="stretch", help="Unblock with 12ft ladder")
 
-        # Standard sandbox permissions for full interactive gaming, links, and forms
+        frame_height = 960 if st.session_state.get("proxy_theater_mode", False) else 780
         iframe_sandbox = "allow-same-origin allow-scripts allow-forms allow-popups allow-pointer-lock allow-modals allow-downloads allow-presentation"
         iframe_allow = "accelerometer; autoplay; camera; clipboard-read; clipboard-write; display-capture; encrypted-media; fullscreen; gamepad; geolocation; gyroscope; microphone; midi; payment; picture-in-picture; screen-wake-lock; web-share"
 
-        # --------------------------------------------------------------------- Mode 1: Interactive Web Gateway
-        if mode == "🌐 Interactive Web Gateway (Google Proxy - Full Clicks & Games)":
-            gateway_url = f"https://translate.google.com/translate?sl=auto&tl=en&u={quote(active_url, safe='')}"
-            st.markdown(
-                f"""
-                <div style="margin-top:8px;border-radius:12px;overflow:hidden;border:1px solid {hex_to_rgba(T['primary'], 0.35)};box-shadow:0 8px 24px rgba(0,0,0,0.3);">
-                  <iframe src="{esc(gateway_url)}"
-                          style="width:100%;height:780px;border:none;background:#ffffff;"
-                          sandbox="{iframe_sandbox}"
-                          allow="{iframe_allow}"
-                          loading="lazy">
-                  </iframe>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            st.caption("⚡ **Interactive Mode Active**: Security headers (CSP, X-Frame-Options) bypassed. Links and interactive scripts route seamlessly through the proxy.")
-
-        # --------------------------------------------------------------------- Mode 2: Smart Direct Stream
-        elif mode == "⚡ Smart Direct Stream (Bypasses Frame & Header Blocks)":
+        # --------------------------------------------------------------------- Mode 1: Smart Direct Stream
+        if mode == "⚡ Smart Web Proxy (Direct Stream - Bypasses Header Blocks)":
             with st.spinner(f"Unblocking and streaming {active_url}..."):
                 try:
                     headers = {
@@ -458,7 +479,7 @@ def render_proxy_portal() -> None:
                         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
                         "Accept-Language": "en-US,en;q=0.9",
                     }
-                    resp = requests.get(active_url, headers=headers, timeout=12, verify=False, allow_redirects=True)
+                    resp = requests.get(active_url, headers=headers, timeout=14, verify=False, allow_redirects=True)
                     resp.encoding = resp.apparent_encoding or "utf-8"
                     raw_html = resp.text
 
@@ -466,7 +487,8 @@ def render_proxy_portal() -> None:
                     raw_html = re.sub(r'<meta[^>]*http-equiv=["\']?Content-Security-Policy["\']?[^>]*>', "", raw_html, flags=re.I)
                     raw_html = re.sub(r'<meta[^>]*http-equiv=["\']?X-Frame-Options["\']?[^>]*>', "", raw_html, flags=re.I)
 
-                    # Base tag injection without target="_blank" so navigation stays interactive
+                    # Remove existing base tags and inject our base href without target="_blank"
+                    raw_html = re.sub(r'<base\s+[^>]*>', '', raw_html, flags=re.I)
                     parsed = urlparse(active_url)
                     base_url = f"{parsed.scheme}://{parsed.netloc}"
                     interactive_bridge = f"""
@@ -489,15 +511,15 @@ def render_proxy_portal() -> None:
                     injected_html = re.sub(r"top\s*!=\s*self", "false", injected_html)
                     injected_html = re.sub(r"self\s*!==\s*top", "false", injected_html)
 
-                    st.components.v1.html(injected_html, height=780, scrolling=True)
+                    st.components.v1.html(injected_html, height=frame_height, scrolling=True)
                 except Exception as e:
                     st.warning(f"Direct stream could not load {active_url}: {e}")
-                    st.info("💡 Falling back to Interactive Web Gateway below:")
-                    gateway_fallback = f"https://translate.google.com/translate?sl=auto&tl=en&u={quote(active_url, safe='')}"
+                    st.info("💡 Falling back to Universal Clean Reader below:")
+                    reader_url = f"https://r.jina.ai/{active_url}"
                     st.markdown(
                         f"""
-                        <iframe src="{esc(gateway_fallback)}"
-                                style="width:100%;height:750px;border:1px solid {hex_to_rgba(T['primary'], 0.3)};border-radius:12px;background:#ffffff;"
+                        <iframe src="{esc(reader_url)}"
+                                style="width:100%;height:{frame_height}px;border:1px solid {hex_to_rgba(T['primary'], 0.3)};border-radius:12px;background:#ffffff;"
                                 sandbox="{iframe_sandbox}"
                                 allow="{iframe_allow}"
                                 loading="lazy">
@@ -506,17 +528,69 @@ def render_proxy_portal() -> None:
                         unsafe_allow_html=True,
                     )
 
-        # --------------------------------------------------------------------- Mode 3: Universal Web Reader
+        # --------------------------------------------------------------------- Mode 2: Universal Web Reader
         elif mode == "📖 Universal Web Reader (Bypasses 100% of Iframe Blocks)":
             reader_url = f"https://r.jina.ai/{active_url}"
             st.markdown(
                 f"""
                 <iframe src="{esc(reader_url)}"
-                        style="width:100%;height:780px;border:1px solid {hex_to_rgba(T['primary'], 0.3)};border-radius:12px;background:#ffffff;"
+                        style="width:100%;height:{frame_height}px;border:1px solid {hex_to_rgba(T['primary'], 0.3)};border-radius:12px;background:#ffffff;"
                         sandbox="{iframe_sandbox}"
                         allow="{iframe_allow}"
                         loading="lazy">
                 </iframe>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        # --------------------------------------------------------------------- Mode 3: Playable Web Games (Arcade Hub)
+        elif mode == "🎮 Playable Web Games (Arcade Hub)":
+            st.markdown("<div style='font-size:0.85rem;color:#8B93B5;margin-bottom:8px;'>SELECT ARCADE TITLE:</div>", unsafe_allow_html=True)
+            g1, g2, g3, g4, g5 = st.columns(5)
+            game_embeds = {
+                "2048": "https://play2048.co/",
+                "Wordle": "https://wordleunlimited.org/",
+                "Hextris": "https://hextris.io/",
+                "Snake": "https://playsnake.org/",
+                "Poki Portal": "https://poki.com",
+            }
+            if "arcade_selected" not in st.session_state:
+                st.session_state["arcade_selected"] = "2048"
+
+            if g1.button("🔢 2048", width="stretch", key="arc_2048"):
+                st.session_state["arcade_selected"] = "2048"
+                st.rerun()
+            if g2.button("🟩 Wordle", width="stretch", key="arc_wordle"):
+                st.session_state["arcade_selected"] = "Wordle"
+                st.rerun()
+            if g3.button("🔷 Hextris", width="stretch", key="arc_hex"):
+                st.session_state["arcade_selected"] = "Hextris"
+                st.rerun()
+            if g4.button("🐍 Snake", width="stretch", key="arc_snake"):
+                st.session_state["arcade_selected"] = "Snake"
+                st.rerun()
+            if g5.button("🎮 Poki Stream", width="stretch", key="arc_poki"):
+                st.session_state["arcade_selected"] = "Poki Portal"
+                st.session_state["proxy_target_url"] = "https://poki.com"
+                st.session_state["proxy_active_url"] = "https://poki.com"
+                st.session_state["proxy_input_val"] = "https://poki.com"
+                st.session_state["proxy_mode_sel"] = "⚡ Smart Web Proxy (Direct Stream - Bypasses Header Blocks)"
+                st.rerun()
+
+            sel_game = st.session_state.get("arcade_selected", "2048")
+            game_url = game_embeds.get(sel_game, "https://play2048.co/")
+
+            st.caption(f"🎮 Playing: **{sel_game}** (`{game_url}`)")
+            st.markdown(
+                f"""
+                <div style="border-radius:12px;overflow:hidden;border:1px solid {hex_to_rgba(T['primary'], 0.35)};box-shadow:0 8px 24px rgba(0,0,0,0.3);">
+                  <iframe src="{esc(game_url)}"
+                          style="width:100%;height:{frame_height}px;border:none;background:#ffffff;"
+                          sandbox="{iframe_sandbox}"
+                          allow="{iframe_allow}"
+                          loading="lazy">
+                  </iframe>
+                </div>
                 """,
                 unsafe_allow_html=True,
             )
