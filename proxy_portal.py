@@ -6,6 +6,8 @@ Accessible via the secret '✨' sparkle on the home greeting.
 from __future__ import annotations
 
 import html
+import math
+import os
 import re
 import socket
 from datetime import datetime
@@ -20,66 +22,259 @@ import db
 from themes import hex_to_rgba
 from ui import ctx, esc, hero, render_avatar_html, section
 
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+def _get_session_val(key: str, default: Any = None) -> Any:
+    """Safely get session_state value even when running outside active Streamlit context."""
+    try:
+        return st.session_state.get(key, default)
+    except Exception:
+        return default
+
 
 # ----------------------------------------------------------------------------- Beam AI Engine
-def _beam_respond(prompt: str) -> str:
-    """Generate intelligent responses for Beam AI."""
+def _try_eval_math(text: str) -> str | None:
+    """Safely detect and evaluate basic mathematical expressions."""
+    t = text.strip()
+
+    # Percentage: e.g. "15% of 850" or "20% 500"
+    pct_m = re.search(r"(\d+(?:\.\d+)?)\s*%\s*(?:of\s*)?(\d+(?:\.\d+)?)", t, re.I)
+    if pct_m:
+        p = float(pct_m.group(1))
+        val = float(pct_m.group(2))
+        res = (p / 100.0) * val
+        return (
+            f"🧮 **Calculation Result**:\n\n"
+            f"**{p:g}% of {val:,.2f}** = **{res:,.2f}**\n\n"
+            f"- Calculation: `({p} / 100) × {val} = {res:,.4f}`"
+        )
+
+    # Basic arithmetic: + - * / ** sqrt
+    cleaned = re.sub(r"[^0-9\+\-\*\/\.\(\)\s]", "", t).strip()
+    if cleaned and any(op in cleaned for op in ("+", "-", "*", "/")) and len(cleaned) >= 3:
+        try:
+            val = eval(
+                cleaned,
+                {"__builtins__": {}},
+                {"sqrt": math.sqrt, "abs": abs, "round": round, "pow": pow},
+            )
+            return (
+                f"🧮 **Calculation Result**:\n\n"
+                f"`{cleaned}` = **{val:,.4g}**"
+            )
+        except Exception:
+            pass
+    return None
+
+
+def _get_finance_snapshot(user_id: int | None = None) -> str:
+    """Analyze real SQLite transaction and budget data for personalized insights."""
+    try:
+        uid = user_id or db.get_current_user_id()
+        df = db.get_transactions(uid)
+        settings = db.get_settings(uid)
+        sym = settings.get("currency", "$")
+
+        if df.empty:
+            return (
+                "📊 **Personal Financial Snapshot**:\n\n"
+                "- You currently have **0 transactions** logged in your account.\n"
+                "- Add expenses or income from the **Dashboard** or **Transactions** page, "
+                "and I will analyze your spending patterns, savings rate, and category breakdowns here!"
+            )
+
+        expenses = df[df["type"] == "Expense"]
+        income = df[df["type"] == "Income"]
+
+        tot_exp = float(expenses["amount"].sum()) if not expenses.empty else 0.0
+        tot_inc = float(income["amount"].sum()) if not income.empty else 0.0
+        net = tot_inc - tot_exp
+        savings_rate = (net / tot_inc * 100) if tot_inc > 0 else 0.0
+
+        top_cats_lines = []
+        if not expenses.empty:
+            cat_sums = expenses.groupby("category")["amount"].sum().sort_values(ascending=False).head(3)
+            for c_name, c_amt in cat_sums.items():
+                pct = (c_amt / tot_exp * 100) if tot_exp > 0 else 0.0
+                top_cats_lines.append(f"  - **{c_name}**: {sym}{c_amt:,.2f} ({pct:.1f}%)")
+
+        status_emoji = "🟢" if net >= 0 else "🔴"
+        status_text = "Net Surplus" if net >= 0 else "Net Deficit"
+
+        res = (
+            f"📊 **Personal Financial Snapshot (Live Account Data)**:\n\n"
+            f"- **Total Income**: `{sym}{tot_inc:,.2f}` across {len(income)} entries\n"
+            f"- **Total Expenses**: `{sym}{tot_exp:,.2f}` across {len(expenses)} entries\n"
+            f"- **Net Balance**: `{sym}{net:,.2f}` ({status_emoji} {status_text})\n"
+            f"- **Savings Rate**: `{savings_rate:.1f}%`\n"
+        )
+
+        if top_cats_lines:
+            res += f"- **Top Spending Categories**:\n" + "\n".join(top_cats_lines) + "\n\n"
+
+        if net < 0:
+            res += "⚠️ **Insight**: Your spending currently exceeds income. Consider reviewing your top categories to optimize discretionary expenses.\n"
+        else:
+            res += "💡 **Insight**: Healthy positive cashflow! Consider allocating excess surplus into your emergency reserve or investments.\n"
+
+        return res
+    except Exception as e:
+        return f"📊 *Unable to load financial snapshot at this moment: {e}*"
+
+
+def _beam_respond(prompt: str, user_id: int | None = None) -> str:
+    """Generate intelligent, accurate responses using live cloud AI, local database, or built-in knowledge."""
     p_lower = prompt.lower().strip()
 
-    # Greetings
+    # 1. Financial analysis from local SQLite database
+    if any(k in p_lower for k in ("my expense", "my spending", "how much did i spend", "my budget", "my balance", "my money", "financial snapshot", "analyze my", "spending summary")):
+        return _get_finance_snapshot(user_id)
+
+    # 2. Math evaluation
+    math_ans = _try_eval_math(prompt)
+    if math_ans:
+        return math_ans
+
+    # 3. Optional Gemini API integration (if user entered key or set in environment)
+    gemini_key = _get_session_val("beam_gemini_api_key") or os.environ.get("GEMINI_API_KEY", "")
+    if gemini_key:
+        try:
+            from google import genai
+            client = genai.Client(api_key=gemini_key)
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+            )
+            if response and response.text:
+                return response.text
+        except Exception:
+            pass
+
+    # 4. Live Cloud AI completion via Pollinations (Fast, free, reliable, no auth required)
+    try:
+        url = "https://text.pollinations.ai/"
+        payload = {
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are Beam, an intelligent, helpful, and concise AI companion inside the Lumen Orbit "
+                        "Proxy Suite. Provide direct, informative, well-structured answers using Markdown. "
+                        "Help users with web proxying, coding, math, general science, trivia, and finance."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "model": "openai",
+            "seed": 42,
+        }
+        res = requests.post(url, json=payload, timeout=7)
+        if res.status_code == 200 and res.text.strip():
+            # Return high quality live AI response
+            return res.text.strip()
+    except Exception:
+        pass
+
+    # 5. Live DuckDuckGo Instant Answer / Knowledge Lookup
+    try:
+        ddg_url = f"https://api.duckduckgo.com/?q={quote(prompt)}&format=json&no_html=1&skip_disambig=1"
+        d_res = requests.get(ddg_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+        if d_res.status_code == 200:
+            data = d_res.json()
+            ans = data.get("Answer", "").strip()
+            abstract = data.get("AbstractText", "").strip()
+            heading = data.get("Heading", "Search Insight")
+            source_url = data.get("AbstractURL", "")
+            if ans:
+                return f"⚡ **Beam Answer**: {ans}"
+            if abstract:
+                src_link = f"\n\n🔗 [Read more on {data.get('AbstractSource', 'Web')}]({source_url})" if source_url else ""
+                return f"📖 **{heading}**:\n\n{abstract}{src_link}"
+    except Exception:
+        pass
+
+    # 6. Live Wikipedia REST API Summary
+    try:
+        clean_q = re.sub(r"^(what is|who is|tell me about|explain|search for)\s+", "", prompt, flags=re.I).strip(" ?.")
+        if clean_q and len(clean_q) >= 3:
+            wiki_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{quote(clean_q.title().replace(' ', '_'))}"
+            w_res = requests.get(wiki_url, headers={"User-Agent": "LumenOrbit/1.0"}, timeout=5)
+            if w_res.status_code == 200:
+                w_data = w_res.json()
+                extract = w_data.get("extract", "").strip()
+                title = w_data.get("title", clean_q)
+                page_url = w_data.get("content_urls", {}).get("desktop", {}).get("page", "")
+                if extract:
+                    link_part = f"\n\n🔗 [Open full article on Wikipedia]({page_url})" if page_url else ""
+                    return f"📚 **{title}** (Wikipedia Summary):\n\n{extract}{link_part}"
+    except Exception:
+        pass
+
+    # 7. Comprehensive Offline Knowledge & Conversational Engine
+    # Web proxy, unblocking, iframes, games
+    if any(w in p_lower for w in ("proxy", "unblock", "website", "browse", "filter", "iframe", "refused to connect", "csp")):
+        return (
+            "🌐 **How Web Proxying & Header Bypassing Works**:\n\n"
+            "1. **Why Sites 'Refuse to Connect'**:\n"
+            "   High-security sites like Poki, Google, or YouTube send the HTTP response header `X-Frame-Options: SAMEORIGIN` "
+            "   and CSP `frame-ancestors 'self'`. When a browser sees these headers inside an `<iframe>`, it blocks rendering.\n\n"
+            "2. **How Orbit Unblocks It**:\n"
+            "   - **🌐 Interactive Web Gateway**: Strips restrictive security headers and dynamically proxies child links, allowing full interaction, clicking, and gaming!\n"
+            "   - **⚡ Smart Direct Stream**: Fetches the raw HTML via server-side Python, injects `<base href>`, removes frame-busting JavaScript (`top.location`), and streams it.\n"
+            "   - **📖 Clean Reader**: Strips all scripts and renders pure, distraction-free text.\n\n"
+            "💡 *Tip: For full interactive navigation with games like Poki, use the **'Interactive Web Gateway'** engine!*"
+        )
+
+    # Poki / Games queries
+    if any(w in p_lower for w in ("poki", "game", "games", "play", "arcade", "retro bowl", "subway surfers")):
+        return (
+            "🎮 **Interactive Games on Lumen Orbit**:\n\n"
+            "- You can play **Poki games, 2048, Retro Bowl, Subway Surfers**, and unblocked web games right inside Orbit!\n"
+            "- Go to the **'Web Proxy'** tab and select **'🌐 Interactive Web Gateway'** or **'🎮 Playable Web Games'**.\n"
+            "- We automatically grant pointer-lock, WebGL, gamepad, and audio permissions so games run smoothly without 'refused to connect' errors!"
+        )
+
+    # General Greetings
     if any(w in p_lower for w in ("hello", "hi", "hey", "who are you", "what is beam")):
         return (
-            "⚡ **Greetings! I am Beam**, your integrated companion in Lumen Orbit. "
-            "I can help you browse, search information, analyze numbers, explain web topics, "
-            "or chat freely. What would you like to explore today?"
+            "⚡ **Greetings! I am Beam**, your integrated AI companion in Lumen Orbit.\n\n"
+            "I can answer questions, analyze numbers, explain complex topics, research concepts, "
+            "and inspect your financial data. Try asking me:\n"
+            "- *'What are my total expenses?'*\n"
+            "- *'What is 15% of 850?'*\n"
+            "- *'How does a reverse proxy bypass CSP headers?'*\n"
+            "- *'Explain quantum computing in simple terms'*"
         )
 
-    # Proxy / Unblocking queries
-    if any(w in p_lower for w in ("proxy", "unblock", "website", "browse", "filter")):
+    # Finance Strategy
+    if any(w in p_lower for w in ("save", "budget", "invest", "money", "debt", "emergency fund")):
         return (
-            "🌐 **Web Proxy Tip**: Switch to the **'Web Proxy'** tab above, paste any URL "
-            "(e.g., `https://blog.free-dyndns.org/` or `https://en.wikipedia.org`), and click **'Browse Web'**. "
-            "You can choose between **Live Sandbox iFrame** or **Server-side Content Reader** to bypass restrictive headers!"
+            "💡 **Core Principles of Financial Health**:\n\n"
+            "1. **The 50/30/20 Framework**: Allocate 50% of net income to Needs (housing, utilities, food), 30% to Wants (hobbies, dining out), and 20% to Savings and Debt payoff.\n"
+            "2. **Emergency Buffer**: Strive for 3–6 months of non-negotiable living expenses stored in a liquid, high-yield account.\n"
+            "3. **Pay Yourself First**: Automate transfers to your savings or investment account on the exact day your paycheck arrives.\n"
+            "4. **Compound Interest**: Investing even $100/month at an average 8% annual return yields over $150,000 across 30 years."
         )
 
-    # Chatroom queries
-    if any(w in p_lower for w in ("chat", "chatroom", "talk", "message")):
+    # Tech & Programming
+    if any(w in p_lower for w in ("python", "code", "streamlit", "sqlite", "javascript", "html", "css", "api")):
         return (
-            "💬 Check out the **'Chatroom'** tab! It's a live shared space where you can leave messages, "
-            "notes, or collaborate across active sessions."
+            f"⚡ **Technical Insight on: *'{prompt}'***\n\n"
+            "- **Architecture**: Lumen is built using a reactive Python & Streamlit frontend backed by a robust SQLite persistence engine.\n"
+            "- **Proxy Layer**: Uses server-side header rewriting, `<base>` injection, CSP stripping, and reverse-proxy translation to embed interactive web content safely.\n"
+            "- **Tip**: If you have a specific programming question, bug, or snippet you want analyzed, paste it here and I'll break it down for you!"
         )
 
-    # Mirror link queries
-    if any(w in p_lower for w in ("mirror", "link", "ip", "url", "domain")):
-        return (
-            "🔗 You can find your current active LAN IP and alternate access URLs under the **'Mirror Links'** tab. "
-            "Use them to access Lumen from other devices on your local network or configure an external tunnel!"
-        )
-
-    # Finance tips
-    if any(w in p_lower for w in ("money", "save", "budget", "expense", "invest", "finance")):
-        return (
-            "💡 **Beam's Golden Financial Rules**:\n\n"
-            "1. **The 50/30/20 Rule**: 50% Needs, 30% Wants, 20% Savings.\n"
-            "2. **Pay Yourself First**: Transfer 15-20% of income to savings before spending.\n"
-            "3. **Track Daily Spending**: Even small $5 daily habits compound to over $1,800/year.\n"
-            "4. **Emergency Fund**: Keep 3–6 months of living expenses in an accessible high-yield account."
-        )
-
-    # General / Search / Tech
-    if any(w in p_lower for w in ("python", "code", "streamlit", "how", "what", "why")):
-        return (
-            f"⚡ **Beam Analysis for: *'{prompt}'***\n\n"
-            "Here is the breakdown:\n"
-            "- **Context**: You are running Lumen on a modern Python & Streamlit engine with SQLite persistence.\n"
-            "- **Insight**: All operations here are private, isolated, and execute locally on your machine.\n"
-            "- **Next Step**: You can use the Web Proxy tab to research this topic further, or ask me for more specific insights!"
-        )
-
-    # Default conversational reply
+    # Deep Contextual Fallback Answer
     return (
-        f"⚡ **Beam**: I received your query: *'{prompt}'*.\n\n"
-        "I am ready to assist! Ask me about web unblocking, budget strategy, coding, or anything else on your mind."
+        f"⚡ **Beam Analysis for: *'{prompt}'***\n\n"
+        f"Here is what you need to know:\n\n"
+        f"- **Core Overview**: Your query pertains to **{prompt}**. When exploring this topic, key factors include "
+        f"understanding the underlying mechanisms, verifying primary sources, and applying practical steps.\n"
+        f"- **Actionable Insight**: You can use the **'Web Proxy'** tab above to research this topic across Wikipedia, DuckDuckGo, "
+        f"or live web portals, or ask me for a specific calculation, definition, or strategy breakdown.\n"
+        f"- **Need More Details?**: Feel free to ask follow-up questions, request step-by-step guides, or ask for financial calculations!"
     )
 
 
@@ -114,10 +309,10 @@ def render_proxy_portal() -> None:
               <span style="font-size:2.2rem;display:inline-block;animation:lm-float 3s ease-in-out infinite">🌌</span>
               <div>
                 <h1 style="margin:0;font-size:1.85rem;font-weight:800;letter-spacing:-0.02em;background:linear-gradient(135deg, {T['primary']}, {T['accent']});-webkit-background-clip:text;-webkit-text-fill-color:transparent;">
-                  Lumen Orbit · Proxy Suite
+                  Lumen Orbit · Interactive Proxy Suite
                 </h1>
                 <div class="lm-muted" style="font-size:.88rem">
-                  Website Unblocker & Web Proxy · Live Chatroom · Mirror Links · In-built Beam AI
+                  Interactive Web Proxy & Unblocker · Live Chatroom · Mirror Links · In-Built Beam AI Agent
                 </div>
               </div>
             </div>
@@ -134,55 +329,64 @@ def render_proxy_portal() -> None:
 
     # Navigation Tabs
     tab_proxy, tab_chat, tab_mirror, tab_beam = st.tabs([
-        "🌐  Web Proxy",
+        "🌐  Web Proxy & Games",
         "💬  Chatroom",
         "🔗  Mirror Links",
-        "⚡  Beam AI",
+        "⚡  Beam AI Agent",
     ])
 
     # ------------------------------------------------------------------------- Tab 1: Web Proxy
     with tab_proxy:
-        section("🌐 Website Unblocker & Web Proxy")
-        st.caption("Browse web pages, unblock filtered sites, and access external tools directly inside Lumen:")
+        section("🌐 Interactive Web Proxy & Unblocker")
+        st.caption("Browse web pages, unblock filtered sites, play games, and interact freely inside Lumen:")
 
-        # Quick preset buttons
-        preset_cols = st.columns(5)
-        def _set_preset(u: str) -> None:
+        # Quick preset buttons (Games + Tools)
+        st.markdown("<div style='font-size:0.8rem;font-weight:600;margin-bottom:6px;color:#8B93B5;'>⚡ QUICK LAUNCH PRESETS:</div>", unsafe_allow_html=True)
+        preset_cols = st.columns(6)
+
+        def _set_preset(u: str, eng: str = "🌐 Interactive Web Gateway (Google Proxy - Full Clicks & Games)") -> None:
             st.session_state["proxy_target_url"] = u
             st.session_state["proxy_active_url"] = u
             st.session_state["proxy_input_val"] = u
+            st.session_state["proxy_mode_sel"] = eng
             st.rerun()
 
-        if preset_cols[0].button("Dyndns Blog", width="stretch", key="ps_dyndns"):
-            _set_preset("https://blog.free-dyndns.org/")
-        if preset_cols[1].button("Wikipedia", width="stretch", key="ps_wiki"):
+        if preset_cols[0].button("🎮 Poki Games", width="stretch", key="ps_poki", help="Interactive Poki Games Portal"):
+            _set_preset("https://poki.com")
+        if preset_cols[1].button("🔢 2048 Game", width="stretch", key="ps_2048", help="Classic Playable 2048 Game"):
+            _set_preset("https://play2048.co/")
+        if preset_cols[2].button("🌐 Wikipedia", width="stretch", key="ps_wiki", help="Interactive Wikipedia"):
             _set_preset("https://en.wikipedia.org/wiki/Main_Page")
-        if preset_cols[2].button("Hacker News", width="stretch", key="ps_hn"):
-            _set_preset("https://news.ycombinator.com")
-        if preset_cols[3].button("DuckDuckGo", width="stretch", key="ps_ddg"):
+        if preset_cols[3].button("🔍 DuckDuckGo", width="stretch", key="ps_ddg", help="Private Web Search"):
             _set_preset("https://html.duckduckgo.com/html/")
-        if preset_cols[4].button("World News", width="stretch", key="ps_news"):
-            _set_preset("https://lite.cnn.com")
+        if preset_cols[4].button("📰 Hacker News", width="stretch", key="ps_hn", help="Tech News & Discussions"):
+            _set_preset("https://news.ycombinator.com")
+        if preset_cols[5].button("💡 DynDNS Blog", width="stretch", key="ps_dyndns", help="Free-DynDNS Proxy Gateway"):
+            _set_preset("https://blog.free-dyndns.org/")
 
-        default_target = st.session_state.get("proxy_target_url", "https://blog.free-dyndns.org/")
+        default_target = st.session_state.get("proxy_target_url", "https://poki.com")
         active_current = st.session_state.get("proxy_active_url", default_target)
         if "proxy_input_val" not in st.session_state:
             st.session_state["proxy_input_val"] = active_current
 
+        # Navigation Bar Form
         with st.form("proxy_nav_bar_form", border=False):
-            u_col1, u_col2, u_col3 = st.columns([3.2, 1.4, 0.9], vertical_alignment="bottom")
+            u_col1, u_col2, u_col3 = st.columns([3.1, 1.6, 0.8], vertical_alignment="bottom")
             url_input = u_col1.text_input(
                 "Target Website URL",
                 value=st.session_state["proxy_input_val"],
-                placeholder="e.g. https://blog.free-dyndns.org/",
+                placeholder="e.g. https://poki.com or https://en.wikipedia.org",
                 key="proxy_url_input_box",
             )
             modes = [
-                "⚡ Smart Web Proxy (Bypasses Frame & Header Blocks)",
+                "🌐 Interactive Web Gateway (Google Proxy - Full Clicks & Games)",
+                "⚡ Smart Direct Stream (Bypasses Frame & Header Blocks)",
                 "📖 Universal Web Reader (Bypasses 100% of Iframe Blocks)",
                 "🛡️ Multi-Proxy Mirror Launcher",
             ]
-            mode = u_col2.selectbox("Proxy Engine", modes, index=0, key="proxy_mode_sel")
+            current_mode = st.session_state.get("proxy_mode_sel", modes[0])
+            mode_idx = modes.index(current_mode) if current_mode in modes else 0
+            mode = u_col2.selectbox("Proxy Engine", modes, index=mode_idx, key="proxy_mode_sel")
             browse_clicked = u_col3.form_submit_button("🚀 Go", type="primary", width="stretch")
 
             if browse_clicked and url_input.strip():
@@ -198,33 +402,57 @@ def render_proxy_portal() -> None:
         if not active_url.startswith(("http://", "https://")):
             active_url = "https://" + active_url
 
-        # Proxy toolbar & unblock mirrors
-        t_col1, t_col2 = st.columns([2.5, 2.5], vertical_alignment="center")
-        with t_col1:
+        # Proxy toolbar & interactive controls
+        tb_col1, tb_col2 = st.columns([3.2, 2.8], vertical_alignment="center")
+        with tb_col1:
             st.markdown(
                 f"""
-                <div style="font-size:.88rem;color:{T['text']};padding:.3rem 0;">
-                  Target: <b style="color:{T['accent']};word-break:break-all;">{esc(active_url)}</b>
+                <div style="font-size:.88rem;color:{T['text']};padding:.3rem 0;display:flex;align-items:center;gap:.5rem;">
+                  <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#10B981;"></span>
+                  <span>Active Target:</span>
+                  <b style="color:{T['accent']};word-break:break-all;">{esc(active_url)}</b>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
-        with t_col2:
+        with tb_col2:
             m1, m2, m3, m4 = st.columns(4)
             with m1:
-                st.link_button("↗ Popout", active_url, width="stretch", help="Open directly in a new browser tab")
+                if st.button("🔄 Reload", width="stretch", key="proxy_reload_btn", help="Reload the proxied window"):
+                    st.rerun()
             with m2:
-                st.link_button("🛡️ 12ft", f"https://12ft.io/{active_url}", width="stretch", help="Unblock with 12ft ladder")
+                st.link_button("↗ Popout", active_url, width="stretch", help="Open directly in a new browser tab")
             with m3:
-                st.link_button("📚 Archive", f"https://web.archive.org/web/{active_url}", width="stretch", help="Open Wayback Machine mirror")
+                st.link_button("🛡️ 12ft", f"https://12ft.io/{active_url}", width="stretch", help="Unblock with 12ft ladder")
             with m4:
-                st.link_button("⚡ Textify", f"https://txtify.it/{active_url}", width="stretch", help="Lightweight unblocked text mirror")
+                st.link_button("📚 Archive", f"https://web.archive.org/web/{active_url}", width="stretch", help="Open Wayback Machine mirror")
 
-        if mode == "⚡ Smart Web Proxy (Bypasses Frame & Header Blocks)":
+        # Standard sandbox permissions for full interactive gaming, links, and forms
+        iframe_sandbox = "allow-same-origin allow-scripts allow-forms allow-popups allow-pointer-lock allow-modals allow-downloads allow-presentation"
+        iframe_allow = "accelerometer; autoplay; camera; clipboard-read; clipboard-write; display-capture; encrypted-media; fullscreen; gamepad; geolocation; gyroscope; microphone; midi; payment; picture-in-picture; screen-wake-lock; web-share"
+
+        # --------------------------------------------------------------------- Mode 1: Interactive Web Gateway
+        if mode == "🌐 Interactive Web Gateway (Google Proxy - Full Clicks & Games)":
+            gateway_url = f"https://translate.google.com/translate?sl=auto&tl=en&u={quote(active_url, safe='')}"
+            st.markdown(
+                f"""
+                <div style="margin-top:8px;border-radius:12px;overflow:hidden;border:1px solid {hex_to_rgba(T['primary'], 0.35)};box-shadow:0 8px 24px rgba(0,0,0,0.3);">
+                  <iframe src="{esc(gateway_url)}"
+                          style="width:100%;height:780px;border:none;background:#ffffff;"
+                          sandbox="{iframe_sandbox}"
+                          allow="{iframe_allow}"
+                          loading="lazy">
+                  </iframe>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.caption("⚡ **Interactive Mode Active**: Security headers (CSP, X-Frame-Options) bypassed. Links and interactive scripts route seamlessly through the proxy.")
+
+        # --------------------------------------------------------------------- Mode 2: Smart Direct Stream
+        elif mode == "⚡ Smart Direct Stream (Bypasses Frame & Header Blocks)":
             with st.spinner(f"Unblocking and streaming {active_url}..."):
                 try:
-                    import urllib3
-                    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
                     headers = {
                         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
@@ -235,57 +463,72 @@ def render_proxy_portal() -> None:
                     raw_html = resp.text
 
                     # Strip meta tags that block iframes or enforce restrictive CSP
-                    raw_html = re.sub(r'<meta[^>]*http-equiv=["\']?Content-Security-Policy["\']?[^>]*>', '', raw_html, flags=re.I)
-                    raw_html = re.sub(r'<meta[^>]*http-equiv=["\']?X-Frame-Options["\']?[^>]*>', '', raw_html, flags=re.I)
+                    raw_html = re.sub(r'<meta[^>]*http-equiv=["\']?Content-Security-Policy["\']?[^>]*>', "", raw_html, flags=re.I)
+                    raw_html = re.sub(r'<meta[^>]*http-equiv=["\']?X-Frame-Options["\']?[^>]*>', "", raw_html, flags=re.I)
 
-                    # Base tag injection so images, CSS, and links resolve
+                    # Base tag injection without target="_blank" so navigation stays interactive
                     parsed = urlparse(active_url)
                     base_url = f"{parsed.scheme}://{parsed.netloc}"
-                    injected_html = f'<base href="{base_url}/" target="_blank">\n' + raw_html
+                    interactive_bridge = f"""
+                    <base href="{base_url}/">
+                    <script>
+                      // Lumen Orbit Interactive Bridge
+                      try {{
+                        window.top = window.self;
+                        window.parent = window.self;
+                      }} catch(e) {{}}
+                    </script>
+                    """
+                    injected_html = interactive_bridge + raw_html
 
                     # Strip frame busting scripts
-                    injected_html = re.sub(r'\btop\.location\b', 'window._disabled_top', injected_html)
-                    injected_html = re.sub(r'\bparent\.location\b', 'window._disabled_top', injected_html)
-                    injected_html = re.sub(r'\bwindow\.top\b', 'window.self', injected_html)
-                    injected_html = re.sub(r'top\s*!==\s*self', 'false', injected_html)
-                    injected_html = re.sub(r'top\s*!=\s*self', 'false', injected_html)
+                    injected_html = re.sub(r"\btop\.location\b", "window._disabled_top", injected_html)
+                    injected_html = re.sub(r"\bparent\.location\b", "window._disabled_top", injected_html)
+                    injected_html = re.sub(r"\bwindow\.top\b", "window.self", injected_html)
+                    injected_html = re.sub(r"top\s*!==\s*self", "false", injected_html)
+                    injected_html = re.sub(r"top\s*!=\s*self", "false", injected_html)
+                    injected_html = re.sub(r"self\s*!==\s*top", "false", injected_html)
 
-                    st.components.v1.html(injected_html, height=750, scrolling=True)
+                    st.components.v1.html(injected_html, height=780, scrolling=True)
                 except Exception as e:
                     st.warning(f"Direct stream could not load {active_url}: {e}")
-                    st.info("⚡ Falling back to Universal Unblocker Reader below:")
-                    reader_url = f"https://r.jina.ai/{active_url}"
+                    st.info("💡 Falling back to Interactive Web Gateway below:")
+                    gateway_fallback = f"https://translate.google.com/translate?sl=auto&tl=en&u={quote(active_url, safe='')}"
                     st.markdown(
                         f"""
-                        <iframe src="{esc(reader_url)}"
+                        <iframe src="{esc(gateway_fallback)}"
                                 style="width:100%;height:750px;border:1px solid {hex_to_rgba(T['primary'], 0.3)};border-radius:12px;background:#ffffff;"
-                                sandbox="allow-same-origin allow-scripts allow-forms allow-popups"
+                                sandbox="{iframe_sandbox}"
+                                allow="{iframe_allow}"
                                 loading="lazy">
                         </iframe>
                         """,
                         unsafe_allow_html=True,
                     )
+
+        # --------------------------------------------------------------------- Mode 3: Universal Web Reader
         elif mode == "📖 Universal Web Reader (Bypasses 100% of Iframe Blocks)":
             reader_url = f"https://r.jina.ai/{active_url}"
             st.markdown(
                 f"""
                 <iframe src="{esc(reader_url)}"
-                        style="width:100%;height:750px;border:1px solid {hex_to_rgba(T['primary'], 0.3)};border-radius:12px;background:#ffffff;"
-                        sandbox="allow-same-origin allow-scripts allow-forms allow-popups"
+                        style="width:100%;height:780px;border:1px solid {hex_to_rgba(T['primary'], 0.3)};border-radius:12px;background:#ffffff;"
+                        sandbox="{iframe_sandbox}"
+                        allow="{iframe_allow}"
                         loading="lazy">
                 </iframe>
                 """,
                 unsafe_allow_html=True,
             )
+
+        # --------------------------------------------------------------------- Mode 4: Multi-Proxy Mirror Launcher
         else:
-            # Multi-Proxy Mirror Launcher
             st.markdown(
                 f"""
                 <div style="background:{hex_to_rgba(T['primary'], 0.1)};border:1px solid {hex_to_rgba(T['primary'], 0.3)};border-radius:14px;padding:24px;margin:16px 0;">
                   <h3 style="margin-top:0;color:{T['primary']};">🌐 Multi-Proxy Unblocker Mirrors</h3>
                   <p class="lm-muted" style="margin-bottom:20px;">
-                    Some high-security websites (e.g. online banking, Google, Cloudflare DDoS challenges) completely disallow embedding in any browser iframe. 
-                    Use any of the specialized mirrors below to access <b>{esc(active_url)}</b> freely:
+                    Some high-security websites disallow iframe embedding. Use any of the specialized mirrors below to access <b>{esc(active_url)}</b> freely:
                   </p>
                   <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:14px;">
                     <a href="{esc(active_url)}" target="_blank" style="text-decoration:none;">
@@ -293,6 +536,13 @@ def render_proxy_portal() -> None:
                         <div style="font-size:1.5rem;margin-bottom:4px;">↗️</div>
                         <div style="font-weight:700;color:#38BDF8;">Direct Popout Tab</div>
                         <div style="font-size:0.75rem;color:#8B93B5;">Open directly in browser</div>
+                      </div>
+                    </a>
+                    <a href="https://translate.google.com/translate?sl=auto&tl=en&u={quote(active_url, safe='')}" target="_blank" style="text-decoration:none;">
+                      <div style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);padding:14px;border-radius:10px;text-align:center;">
+                        <div style="font-size:1.5rem;margin-bottom:4px;">🌐</div>
+                        <div style="font-weight:700;color:#38BDF8;">Google Web Gateway</div>
+                        <div style="font-size:0.75rem;color:#8B93B5;">Interactive unblocker</div>
                       </div>
                     </a>
                     <a href="https://12ft.io/{esc(active_url)}" target="_blank" style="text-decoration:none;">
@@ -306,7 +556,7 @@ def render_proxy_portal() -> None:
                       <div style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);padding:14px;border-radius:10px;text-align:center;">
                         <div style="font-size:1.5rem;margin-bottom:4px;">📚</div>
                         <div style="font-weight:700;color:#38BDF8;">Wayback Machine</div>
-                        <div style="font-size:0.75rem;color:#8B93B5;">Internet Archive mirror</div>
+                        <div style="font-size:0.75rem;color:#8B93B5;">Internet Archive snapshot</div>
                       </div>
                     </a>
                     <a href="https://txtify.it/{esc(active_url)}" target="_blank" style="text-decoration:none;">
@@ -423,8 +673,8 @@ def render_proxy_portal() -> None:
 
     # ------------------------------------------------------------------------- Tab 4: Beam AI
     with tab_beam:
-        section("⚡ Beam — In-Built AI Assistant")
-        st.caption("Beam is your intelligent companion for research, web questions, numbers, and advice:")
+        section("⚡ Beam — In-Built AI Agent")
+        st.caption("Beam is your intelligent companion for research, website explanations, live calculations, and expense analysis:")
 
         # Initialize Beam chat session
         if "beam_chat_messages" not in st.session_state:
@@ -432,22 +682,63 @@ def render_proxy_portal() -> None:
                 {
                     "role": "assistant",
                     "content": (
-                        "⚡ **Hello! I'm Beam.** I can help you search information, unblock concepts, "
-                        "analyze budgets, or explain complex topics. What can I do for you today?"
+                        "⚡ **Hello! I'm Beam**, your live AI companion inside Lumen Orbit.\n\n"
+                        "I can answer complex questions, solve math calculations, explain web topics, "
+                        "and inspect your personal expenses directly from your database. What would you like to explore?"
                     ),
                 }
             ]
 
-        b_top1, b_top2 = st.columns([4, 1], vertical_alignment="center")
+        # Action bar & Engine status
+        b_top1, b_top2 = st.columns([4, 1.2], vertical_alignment="center")
+        with b_top1:
+            st.markdown(
+                f"""
+                <div style="font-size:.82rem;color:{T['text']};display:flex;align-items:center;gap:.5rem;">
+                  <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#10B981;"></span>
+                  <span>Engine: <b>Live Cloud AI + SQLite Intelligence + Safe Math Evaluator</b></span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
         with b_top2:
             if st.button("🧹 Clear Chat", icon=":material/refresh:", width="stretch", key="clear_beam_btn"):
                 st.session_state["beam_chat_messages"] = [
-                    {"role": "assistant", "content": "⚡ Beam memory reset. What should we explore next?"}
+                    {"role": "assistant", "content": "⚡ Memory reset. What would you like to ask or calculate?"}
                 ]
                 st.rerun()
 
+        # Settings and quick prompt expander
+        with st.expander("⚙️ AI Settings & Suggested Quick Prompts", expanded=False):
+            st.caption("Optionally connect your personal Gemini API key or click a quick prompt below:")
+            k_col1, k_col2 = st.columns([3.5, 1.5], vertical_alignment="bottom")
+            curr_gem_key = st.session_state.get("beam_gemini_api_key", os.environ.get("GEMINI_API_KEY", ""))
+            new_key = k_col1.text_input("Gemini API Key (Optional)", value=curr_gem_key, type="password", key="beam_key_input")
+            if k_col2.button("Save Key", width="stretch"):
+                st.session_state["beam_gemini_api_key"] = new_key.strip()
+                st.toast("Key updated for Beam!", icon="🔑")
+
+            st.write("")
+            st.markdown("<div style='font-size:0.8rem;font-weight:600;color:#8B93B5;'>SUGGESTED PROMPTS:</div>", unsafe_allow_html=True)
+            p_cols = st.columns(4)
+
+            def _send_quick_prompt(qp: str) -> None:
+                st.session_state["beam_chat_messages"].append({"role": "user", "content": qp})
+                rep = _beam_respond(qp, user_id=user.get("id", 1))
+                st.session_state["beam_chat_messages"].append({"role": "assistant", "content": rep})
+                st.rerun()
+
+            if p_cols[0].button("📊 My Expenses", width="stretch", key="qp_exp"):
+                _send_quick_prompt("What are my total expenses and top spending categories?")
+            if p_cols[1].button("🌐 Web Proxying", width="stretch", key="qp_prox"):
+                _send_quick_prompt("How does the web proxy bypass CSP and X-Frame-Options headers?")
+            if p_cols[2].button("🧮 20% of $450", width="stretch", key="qp_math"):
+                _send_quick_prompt("What is 20% of 450?")
+            if p_cols[3].button("🎮 Unblocked Games", width="stretch", key="qp_games"):
+                _send_quick_prompt("How can I play unblocked games like Poki in Orbit?")
+
         # Chat display container
-        beam_box = st.container(height=420, border=True)
+        beam_box = st.container(height=460, border=True)
         with beam_box:
             for m in st.session_state["beam_chat_messages"]:
                 is_ai = m["role"] == "assistant"
@@ -456,9 +747,9 @@ def render_proxy_portal() -> None:
                     st.markdown(m["content"])
 
         # Chat prompt input
-        user_prompt = st.chat_input("Ask Beam anything...", key="beam_user_input")
+        user_prompt = st.chat_input("Ask Beam anything, calculate math, or ask about your expenses...", key="beam_user_input")
         if user_prompt:
             st.session_state["beam_chat_messages"].append({"role": "user", "content": user_prompt})
-            ai_reply = _beam_respond(user_prompt)
+            ai_reply = _beam_respond(user_prompt, user_id=user.get("id", 1))
             st.session_state["beam_chat_messages"].append({"role": "assistant", "content": ai_reply})
             st.rerun()
