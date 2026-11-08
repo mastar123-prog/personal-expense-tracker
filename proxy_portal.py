@@ -625,33 +625,127 @@ def render_proxy_portal() -> None:
                     interactive_bridge = f"""
                     <base href="{base_url}/">
                     <script>
-                      try {{
-                        Object.defineProperty(window, 'top', {{ get: function() {{ return window.self; }} }});
-                        Object.defineProperty(window, 'parent', {{ get: function() {{ return window.self; }} }});
-                        Object.defineProperty(window, 'frameElement', {{ get: function() {{ return null; }} }});
-                      }} catch(e) {{}}
+                      (function() {{
+                        // Disarm frame-busters
+                        try {{
+                          Object.defineProperty(window, 'top', {{ get: function() {{ return window.self; }} }});
+                          Object.defineProperty(window, 'parent', {{ get: function() {{ return window.self; }} }});
+                          Object.defineProperty(window, 'frameElement', {{ get: function() {{ return null; }} }});
+                        }} catch(e) {{}}
 
-                      // Intercept link clicks so external navigations open safely in a new tab without frame blocks
-                      document.addEventListener('click', function(e) {{
-                        var a = e.target.closest('a');
-                        if (a && a.href && !a.href.startsWith('javascript:') && !a.href.startsWith('#')) {{
-                          a.target = '_blank';
-                          a.rel = 'noopener noreferrer';
+                        function toAbsolute(url) {{
+                          if (!url) return '';
+                          try {{
+                            return new URL(url, document.baseURI || window.location.href).href;
+                          }} catch(e) {{
+                            return url;
+                          }}
                         }}
-                      }}, true);
 
-                      // Intercept form submissions so they submit safely in a new tab
-                      document.addEventListener('submit', function(e) {{
-                        if (e.target && e.target.tagName === 'FORM') {{
-                          e.target.target = '_blank';
+                        function safeNavigate(dest) {{
+                          if (!dest) return;
+                          var clean = dest.toString().trim();
+                          if (!clean || clean.startsWith('javascript:') || clean.startsWith('#')) return;
+                          var abs = toAbsolute(clean);
+
+                          // Auth / OAuth endpoints block iframes by policy
+                          var isAuth = /(accounts\\.google\\.com|github\\.com\\/login|appleid\\.apple\\.com|login\\.microsoftonline\\.com|auth0\\.com)/i.test(abs);
+                          if (isAuth) {{
+                            window.open(abs, '_blank', 'noopener,noreferrer');
+                            return;
+                          }}
+
+                          // Attempt to route next page through parent Streamlit Proxy
+                          try {{
+                            if (window.top && window.top !== window && window.top.location) {{
+                              var origin = window.top.location.origin;
+                              var path = window.top.location.pathname;
+                              window.top.location.href = origin + path + '?proxy=1&proxy_url=' + encodeURIComponent(abs);
+                              return;
+                            }}
+                          }} catch(err) {{}}
+
+                          // Fallback: If top-level navigation is sandboxed, open cleanly in popout tab
+                          // rather than navigating the iframe directly (which triggers "refused to connect")
+                          window.open(abs, '_blank', 'noopener,noreferrer');
                         }}
-                      }}, true);
 
-                      // Intercept window.open
-                      var _origOpen = window.open;
-                      window.open = function(url, target, features) {{
-                        return _origOpen.call(window, url, '_blank', features);
-                      }};
+                        // Intercept all clicks (links, buttons like "Get Started", inputs)
+                        document.addEventListener('click', function(e) {{
+                          var a = e.target.closest('a');
+                          if (a && a.href) {{
+                            var h = a.getAttribute('href');
+                            if (h && !h.startsWith('javascript:') && !h.startsWith('#')) {{
+                              e.preventDefault();
+                              e.stopPropagation();
+                              safeNavigate(a.href);
+                              return;
+                            }}
+                          }}
+
+                          var btn = e.target.closest('button, [role="button"], input[type="submit"], input[type="button"], .btn');
+                          if (btn) {{
+                            var dest = btn.getAttribute('data-href') || btn.getAttribute('data-url') || btn.getAttribute('href') || btn.getAttribute('formaction');
+                            if (dest) {{
+                              e.preventDefault();
+                              e.stopPropagation();
+                              safeNavigate(dest);
+                              return;
+                            }}
+                            if (btn.form && btn.form.action) {{
+                              var f = btn.form;
+                              var method = (f.method || 'GET').toUpperCase();
+                              if (method === 'GET') {{
+                                e.preventDefault();
+                                e.stopPropagation();
+                                var q = new URLSearchParams(new FormData(f)).toString();
+                                var fullAction = toAbsolute(f.action);
+                                var target = fullAction + (fullAction.includes('?') ? '&' : '?') + q;
+                                safeNavigate(target);
+                                return;
+                              }} else {{
+                                f.target = '_blank';
+                              }}
+                            }}
+                          }}
+                        }}, true);
+
+                        // Intercept form submissions
+                        document.addEventListener('submit', function(e) {{
+                          var f = e.target;
+                          if (f && f.action) {{
+                            var method = (f.method || 'GET').toUpperCase();
+                            if (method === 'GET') {{
+                              e.preventDefault();
+                              e.stopPropagation();
+                              var q = new URLSearchParams(new FormData(f)).toString();
+                              var fullAction = toAbsolute(f.action);
+                              var dest = fullAction + (fullAction.includes('?') ? '&' : '?') + q;
+                              safeNavigate(dest);
+                            }} else {{
+                              f.target = '_blank';
+                            }}
+                          }}
+                        }}, true);
+
+                        // Intercept window.open
+                        var _origOpen = window.open;
+                        window.open = function(url, target, features) {{
+                          if (url) {{
+                            safeNavigate(url);
+                            return null;
+                          }}
+                          return _origOpen.call(window, url, target, features);
+                        }};
+
+                        // Intercept location.assign & location.replace
+                        try {{
+                          var _origAssign = window.location.assign;
+                          window.location.assign = function(u) {{ safeNavigate(u); }};
+                          var _origReplace = window.location.replace;
+                          window.location.replace = function(u) {{ safeNavigate(u); }};
+                        }} catch(e) {{}}
+                      }})();
                     </script>
                     """
                     injected_html = interactive_bridge + raw_html

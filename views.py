@@ -583,89 +583,6 @@ def _render_daily_view(df: pd.DataFrame) -> None:
                 show_chart(fig, key=f"month_daily_bars_{cur_day.month}_{cur_day.year}", height=220)
 
 
-def page_dashboard() -> None:
-    # Handle secret proxy suite launch via query param or session state
-    if st.query_params.get("proxy") == "1" or st.session_state.get("show_proxy_portal"):
-        st.query_params.clear()
-        st.session_state["show_proxy_portal"] = True
-
-    if st.session_state.get("show_proxy_portal"):
-        import proxy_portal
-        proxy_portal.render_proxy_portal()
-        return
-
-    c = ctx()
-    T = c["T"]
-    df = db.get_transactions()
-    name = c["settings"].get("user_name") or ""
-
-    top_l, top_r = st.columns([2.5, 1.7], vertical_alignment="bottom")
-    with top_l:
-        greet_title = f"{_greeting()}{', ' + esc(name) if name else ''}"
-        sub_title = f"Here's your money story · {date.today():%A, %B %d}"
-
-        # Natural Themed Sparkle Trigger: Zero outline, themed vector star glyph, zero-jitter layout
-        html(f"""
-        <style>
-        div.st-key-sparkle_proxy_trigger {{
-            display: inline-flex !important;
-            align-items: center !important;
-            justify-content: flex-start !important;
-            padding: 0 !important;
-            margin: 0 !important;
-        }}
-        div.st-key-sparkle_proxy_trigger button,
-        div.st-key-sparkle_proxy_trigger button:hover,
-        div.st-key-sparkle_proxy_trigger button:focus,
-        div.st-key-sparkle_proxy_trigger button:active,
-        div.st-key-sparkle_proxy_trigger button:focus-visible {{
-            background: transparent !important;
-            background-color: transparent !important;
-            border: none !important;
-            border-width: 0 !important;
-            box-shadow: none !important;
-            outline: none !important;
-            padding: 0 4px !important;
-            margin: 0 !important;
-            min-height: unset !important;
-            height: auto !important;
-            line-height: 1 !important;
-            font-size: 1.7rem !important;
-            cursor: pointer !important;
-            background: linear-gradient(135deg, {T['primary']}, {T['accent']}) !important;
-            -webkit-background-clip: text !important;
-            -webkit-text-fill-color: transparent !important;
-            transition: transform 0.2s ease, filter 0.2s ease !important;
-        }}
-        div.st-key-sparkle_proxy_trigger button:hover {{
-            transform: scale(1.2) rotate(12deg) !important;
-            filter: drop-shadow(0 0 6px {T['accent']}) !important;
-        }}
-        div.st-key-sparkle_proxy_trigger div[data-testid="stMarkdownContainer"] p {{
-            font-size: 1.7rem !important;
-            line-height: 1 !important;
-            margin: 0 !important;
-            background: linear-gradient(135deg, {T['primary']}, {T['accent']}) !important;
-            -webkit-background-clip: text !important;
-            -webkit-text-fill-color: transparent !important;
-        }}
-        </style>
-        """)
-
-        c_title, c_star = st.columns([0.9, 0.1], vertical_alignment="center")
-        with c_title:
-            st.markdown(f'<h1 class="lm-hero-title" style="margin:0;padding:0;line-height:1.2;">{greet_title}</h1>', unsafe_allow_html=True)
-        with c_star:
-            if st.button("✦", key="sparkle_proxy_trigger", help="Orbit Portal"):
-                st.session_state["show_proxy_portal"] = True
-                st.rerun()
-
-        st.markdown(f'<div class="lm-hero-sub" style="margin-top:0.25rem;margin-bottom:1.1rem">{sub_title}</div>', unsafe_allow_html=True)
-
-    if df.empty:
-        return df
-    return df[df["date"].dt.to_period("M") == period]
-
 
 def _sum(df: pd.DataFrame, tx_type: str) -> float:
     if df.empty:
@@ -1197,7 +1114,6 @@ def _render_daily_view(df: pd.DataFrame) -> None:
 def page_dashboard() -> None:
     # Handle secret proxy suite launch via query param or session state
     if st.query_params.get("proxy") == "1" or st.session_state.get("show_proxy_portal"):
-        st.query_params.clear()
         st.session_state["show_proxy_portal"] = True
 
     if st.session_state.get("show_proxy_portal"):

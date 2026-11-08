@@ -1409,3 +1409,4 @@ def get_tetris_html(theme_primary: str = "#6366F1", theme_bg: str = "#0F172A") -
 </script>
 </body>
 </html>"""
+
