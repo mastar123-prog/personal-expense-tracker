@@ -537,6 +537,39 @@ def change_password(user_id: int, old_password: str, new_password: str) -> tuple
     return True, "Password updated successfully!"
 
 
+def delete_user_by_id(user_id: int) -> bool:
+    """Safely delete a user account and all associated user data (cascade). Protects demo (id=1)."""
+    uid = int(user_id)
+    if uid == 1:
+        return False
+    with db._conn() as con:
+        user_row = con.execute("SELECT id, email FROM users WHERE id = ?", (uid,)).fetchone()
+        if not user_row:
+            return False
+        clean_e = user_row["email"]
+        for tbl in ["transactions", "categories", "budgets", "recurring", "goals", "settings"]:
+            try:
+                con.execute(f"DELETE FROM {tbl} WHERE user_id = ?", (uid,))
+            except Exception:
+                pass
+        try:
+            con.execute("DELETE FROM auth_tokens WHERE email = ?", (clean_e,))
+        except Exception:
+            pass
+        con.execute("DELETE FROM users WHERE id = ?", (uid,))
+        return True
+
+
+def delete_user_by_email(email: str) -> bool:
+    """Safely delete a user account by email address (cascade). Protects demo (id=1)."""
+    clean_e = email.strip().lower()
+    with db._conn() as con:
+        user_row = con.execute("SELECT id FROM users WHERE email = ?", (clean_e,)).fetchone()
+        if not user_row or int(user_row["id"]) == 1:
+            return False
+        return delete_user_by_id(int(user_row["id"]))
+
+
 def get_current_user() -> dict[str, Any] | None:
     """Retrieve the current user from st.session_state if present."""
     return st.session_state.get("user")
@@ -593,6 +626,26 @@ def render_auth_page() -> None:
                         sign_in(user)
                     else:
                         st.error(msg)
+                        if "@" in ident:
+                            st.session_state["login_trouble_email"] = ident.strip().lower()
+
+            trouble_email = st.session_state.get("login_trouble_email")
+            if trouble_email:
+                col_tr1, col_tr2 = st.columns(2)
+                with col_tr1:
+                    if st.button(f"📬 Send Code to {trouble_email}", width="stretch", key="btn_trouble_otp"):
+                        ok_otp, msg_otp = request_email_login_otp(trouble_email)
+                        if ok_otp:
+                            st.session_state["otp_target_email"] = trouble_email
+                            st.session_state.pop("login_trouble_email", None)
+                            st.toast("Sign-in code dispatched! Enter it on the 'Email OTP' tab.", icon="📬")
+                            st.rerun()
+                        else:
+                            st.error(msg_otp)
+                with col_tr2:
+                    if st.button("Dismiss", width="stretch", key="btn_trouble_dismiss"):
+                        st.session_state.pop("login_trouble_email", None)
+                        st.rerun()
 
             st.markdown(
                 "<div style='text-align:center;margin:.8rem 0 .4rem' class='lm-muted'>— or —</div>",
@@ -613,9 +666,136 @@ def render_auth_page() -> None:
 
         # Tab 2: Create Account (GitHub-style 2-Step Flow)
         with tab_signup:
+            conflict_otp = st.session_state.get("conflict_otp_target")
+            conflict = st.session_state.get("signup_conflict")
             verified_target = st.session_state.get("su_email_verified_target")
 
-            if not verified_target:
+            if conflict_otp:
+                # Step: Instant Sign-in Launch Code
+                st.markdown(
+                    f"""
+                    <div style="background:rgba(22, 27, 34, 0.85);border:1px solid rgba(48, 54, 61, 0.9);border-radius:12px;padding:20px;text-align:center;margin-bottom:14px;">
+                      <div style="font-size:2.2rem;margin-bottom:6px;">📬</div>
+                      <h3 style="margin:0 0 6px;color:#F0F6FC;font-size:1.35rem;font-weight:600;">Sign in with launch code</h3>
+                      <div style="font-size:0.9rem;color:#8B949E;line-height:1.45;">
+                        We sent a 6-digit sign-in code to <b style="color:#58A6FF;">{conflict_otp}</b>.<br>
+                        Enter the code below to access your account immediately.
+                      </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                dev_code = st.session_state.get("dev_last_otp_code")
+                dev_email = st.session_state.get("dev_last_otp_email")
+                has_dev_code = bool(dev_code and dev_email == conflict_otp)
+
+                if has_dev_code:
+                    col_code_msg, col_code_btn = st.columns([3, 1.4], vertical_alignment="center")
+                    with col_code_msg:
+                        st.markdown(
+                            f"""
+                            <div style="background:rgba(56, 189, 248, 0.08);border:1px solid rgba(56, 189, 248, 0.25);border-radius:8px;padding:8px 12px;font-size:0.84rem;color:#8B949E;">
+                              💡 <b>GitHub Sandbox Code</b>: <span style="font-family:monospace;font-weight:800;color:#38BDF8;font-size:1.05rem;letter-spacing:2px;margin-left:4px;">{dev_code}</span>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
+                    with col_code_btn:
+                        if st.button("⚡ Autofill Code", width="stretch", key="btn_autofill_c_otp_code"):
+                            st.session_state["c_otp_autofill_val"] = dev_code
+                            st.rerun()
+
+                with st.form("conflict_otp_form", border=True):
+                    initial_val = st.session_state.pop("c_otp_autofill_val", "")
+                    c_otp_code = st.text_input("6-Digit Sign-In Code", value=initial_val, placeholder="123456", max_chars=6)
+                    c_otp_sub = st.form_submit_button("Verify & Sign In", type="primary", icon=":material/login:", width="stretch")
+
+                if c_otp_sub:
+                    if not c_otp_code:
+                        st.error("Please enter the 6-digit code.")
+                    else:
+                        ok, msg, u = login_with_email_otp(conflict_otp, c_otp_code)
+                        if ok and u:
+                            st.session_state.pop("conflict_otp_target", None)
+                            st.session_state.pop("signup_conflict", None)
+                            st.session_state.pop("dev_last_otp_code", None)
+                            st.toast("Signed in successfully!", icon="🎉")
+                            sign_in(u)
+                        else:
+                            st.error(msg)
+
+                if st.button("⬅️ Back to Options", width="stretch", key="btn_c_otp_back"):
+                    st.session_state.pop("conflict_otp_target", None)
+                    st.rerun()
+
+            elif conflict:
+                # GitHub-style conflict resolution card
+                st.markdown(
+                    f"""
+                    <div style="background:rgba(22, 27, 34, 0.9);border:1px solid rgba(248, 81, 73, 0.45);border-radius:12px;padding:20px;margin-bottom:16px;">
+                      <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
+                        <span style="font-size:1.8rem;">⚠️</span>
+                        <div>
+                          <h3 style="margin:0;color:#F85149;font-size:1.15rem;font-weight:600;">Email Already Registered</h3>
+                          <div style="font-size:0.88rem;color:#8B949E;margin-top:2px;">
+                            The email <b style="color:#58A6FF;">{conflict['email']}</b> is already linked to account <b>@{conflict['existing_username']}</b>.
+                          </div>
+                        </div>
+                      </div>
+                      <div style="font-size:0.88rem;color:#C9D1D9;margin-top:12px;line-height:1.45;">
+                        You don't have to get stuck in an error loop! Select an option below to proceed:
+                      </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                c_res1, c_res2 = st.columns(2)
+                with c_res1:
+                    if st.button("📬 Instant Code Sign-In", type="primary", width="stretch", key="btn_conflict_instant_login", help="Send a 6-digit launch code to sign in immediately"):
+                        code = create_otp(conflict["email"], "email_login", validity_minutes=15)
+                        send_auth_email(conflict["email"], "[Lumen] Sign-in Launch Code", code, "Instant Sign-In")
+                        st.session_state["conflict_otp_target"] = conflict["email"]
+                        st.toast("Sign-in code dispatched!", icon="📬")
+                        st.rerun()
+
+                with c_res2:
+                    if st.button("🗑️ Overwrite & Register Fresh", width="stretch", key="btn_conflict_overwrite", help="Wipe stale test account and register fresh with your new password"):
+                        if conflict["existing_id"] == 1:
+                            st.error("The default demo account cannot be overwritten.")
+                        else:
+                            delete_user_by_id(conflict["existing_id"])
+                            ok, msg, new_user = register_user(
+                                conflict["desired_username"],
+                                conflict["email"],
+                                conflict["desired_pwd"],
+                                conflict["desired_name"],
+                                conflict["desired_avatar"],
+                            )
+                            if ok and new_user:
+                                st.session_state.pop("signup_conflict", None)
+                                st.toast(f"Account refreshed! Welcome, {new_user['full_name']}!", icon="🎉")
+                                sign_in(new_user)
+                            else:
+                                st.error(msg)
+
+                c_res3, c_res4 = st.columns(2)
+                with c_res3:
+                    if st.button("🔑 Reset Password", width="stretch", key="btn_conflict_reset"):
+                        code = create_otp(conflict["email"], "password_reset", validity_minutes=15)
+                        send_auth_email(conflict["email"], "[Lumen] Password Reset Code", code, "Password Reset")
+                        st.session_state["fp_target_email"] = conflict["email"]
+                        st.session_state.pop("signup_conflict", None)
+                        st.toast("Password reset code sent! Switch to the 'Forgot Password' tab to enter code.", icon="🔑")
+                        st.rerun()
+
+                with c_res4:
+                    if st.button("✏️ Change Email / Details", width="stretch", key="btn_conflict_cancel"):
+                        st.session_state.pop("signup_conflict", None)
+                        st.rerun()
+
+            elif not verified_target:
                 # Step 1: Account Details
                 st.markdown("**Create your account** with GitHub-style email verification:")
                 with st.form("signup_details_form", border=True):
@@ -651,12 +831,34 @@ def render_auth_page() -> None:
                         clean_u = su_user.strip().lower()
                         clean_e = su_email.strip().lower()
                         with db._conn() as con:
-                            taken = con.execute("SELECT username, email FROM users WHERE username = ? OR email = ?", (clean_u, clean_e)).fetchone()
-                        if taken:
-                            if taken["username"] == clean_u:
-                                st.error("Username is already taken. Please choose another.")
+                            taken_email = con.execute(
+                                "SELECT id, username, email, password_hash, salt, full_name, avatar FROM users WHERE email = ?",
+                                (clean_e,),
+                            ).fetchone()
+                            taken_user = con.execute(
+                                "SELECT id, username, email FROM users WHERE username = ?",
+                                (clean_u,),
+                            ).fetchone()
+
+                        if taken_email:
+                            # If password matches existing account, sign in immediately!
+                            if verify_password(su_pwd, taken_email["password_hash"], taken_email["salt"]):
+                                user_obj = get_user_by_id(taken_email["id"])
+                                st.toast(f"Welcome back, {user_obj['full_name']}! Signed in to your account.", icon="🎉")
+                                sign_in(user_obj)
                             else:
-                                st.error("Email is already registered. Please sign in.")
+                                st.session_state["signup_conflict"] = {
+                                    "existing_id": taken_email["id"],
+                                    "existing_username": taken_email["username"],
+                                    "email": clean_e,
+                                    "desired_username": clean_u,
+                                    "desired_name": su_name,
+                                    "desired_avatar": su_avatar,
+                                    "desired_pwd": su_pwd,
+                                }
+                                st.rerun()
+                        elif taken_user:
+                            st.error(f"Username '{clean_u}' is already taken. Try '{clean_u}_{secrets.randbelow(90) + 10}' or choose another.")
                         else:
                             with st.spinner("Dispatching verification launch code..."):
                                 code = create_otp(clean_e, "signup_verify", validity_minutes=15)
