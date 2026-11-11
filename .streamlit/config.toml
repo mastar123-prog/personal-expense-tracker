@@ -10,4 +10,8 @@ textColor = "#E6E9F5"
 toolbarMode = "minimal"
 
 [server]
+headless = true
 runOnSave = true
+
+[browser]
+gatherUsageStats = false

@@ -36,7 +36,12 @@ T = get_theme(settings.get("theme"))
 
 # Push the theme into Streamlit's native config only when theme actually changes (prevents double-rerun glitches)
 cur_theme_name = T["name"]
-if st.session_state.get("_last_synced_theme") != cur_theme_name:
+if "_last_synced_theme" not in st.session_state:
+    # First load: sync native options silently without triggering an early rerun abort
+    st.session_state["_last_synced_theme"] = cur_theme_name
+    sync_native_theme(T)
+elif st.session_state["_last_synced_theme"] != cur_theme_name:
+    # User changed the theme: sync and rerun once so native components adopt it
     st.session_state["_last_synced_theme"] = cur_theme_name
     if sync_native_theme(T):
         st.rerun()
