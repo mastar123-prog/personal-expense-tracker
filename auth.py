@@ -294,6 +294,83 @@ def send_auth_email(to_email: str, subject: str, code: str, purpose: str) -> tup
     return True, f"Verification launch code generated for {clean_email}!"
 
 
+def send_smtp_verification_code(
+    host: str, port: int, email: str, password: str, code: str
+) -> tuple[bool, str]:
+    """Send a real 6-digit verification code directly through the provided SMTP server.
+
+    Does NOT fall back to the local sandbox — used to verify that the email address
+    is real and the SMTP credentials actually work before saving them.
+    """
+    clean_host = host.strip()
+    clean_email = email.strip().lower()
+    clean_pass = password.strip()
+
+    if not clean_host:
+        return False, "Please enter an SMTP server host (e.g. smtp.gmail.com)."
+    if not clean_email or "@" not in clean_email or "." not in clean_email.split("@", 1)[1]:
+        return False, "Please enter a valid email address."
+    if not clean_pass:
+        return False, "Please enter your password."
+
+    domain = clean_email.split("@", 1)[1].strip()
+    mx_hosts = get_mx_records(domain)
+    if not mx_hosts and domain not in ("localhost", "local"):
+        return False, f"Email domain '{domain}' does not appear to have a valid mail server."
+
+    body_text = (
+        f"Lumen Email Connection Test\n\n"
+        f"Your 6-digit verification code is:\n"
+        f"  {code}\n\n"
+        f"Enter this code in Lumen to confirm your email is real and finish connecting.\n"
+        f"This code expires in 10 minutes.\n\n"
+        f"— Lumen"
+    )
+    body_html = f"""
+    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;max-width:520px;margin:0 auto;padding:28px 24px;background:#0d1117;color:#c9d1d9;border-radius:12px;border:1px solid #30363d;">
+      <div style="text-align:center;margin-bottom:20px;">
+        <div style="font-size:32px;line-height:1;">✨</div>
+        <h2 style="color:#ffffff;font-size:20px;margin:10px 0 4px;font-weight:600;">Confirm your email connection</h2>
+        <p style="color:#8b949e;font-size:14px;margin:0;">Enter this 6-digit code in Lumen to verify your email is real.</p>
+      </div>
+      <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:22px;text-align:center;margin:20px 0;">
+        <div style="font-size:34px;font-weight:700;letter-spacing:8px;color:#58a6ff;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;">{code}</div>
+      </div>
+      <p style="font-size:12px;color:#8b949e;text-align:center;margin:0;">Expires in 10 minutes. If you didn't request this test, you can ignore it.</p>
+    </div>
+    """
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = "[Lumen] Your email verification test code"
+    msg["From"] = f"Lumen <{clean_email}>"
+    msg["To"] = clean_email
+    msg.attach(MIMEText(body_text, "plain"))
+    msg.attach(MIMEText(body_html, "html"))
+
+    try:
+        if int(port) == 465:
+            server = smtplib.SMTP_SSL(clean_host, int(port), timeout=12)
+        else:
+            server = smtplib.SMTP(clean_host, int(port), timeout=12)
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+        server.login(clean_email, clean_pass)
+        server.sendmail(clean_email, [clean_email], msg.as_string())
+        server.quit()
+        return True, f"Verification code sent to {clean_email}! Check your inbox."
+    except smtplib.SMTPAuthenticationError:
+        return (
+            False,
+            "Sign-in was rejected by your email provider. Double-check your email & password "
+            "(if you use 2-Step Verification on Gmail/Outlook, generate a sign-in password in your account security settings).",
+        )
+    except (socket.gaierror, TimeoutError, OSError) as e:
+        return False, f"Could not reach {clean_host}:{port} ({e}). Check the server host and port."
+    except Exception as e:
+        return False, f"Could not send test email: {e}"
+
+
 def request_password_reset(username_or_email: str) -> tuple[bool, str, str | None]:
     """Initiate password reset for a username or email. Returns (success, msg, email)."""
     identifier = username_or_email.strip().lower()
@@ -972,7 +1049,7 @@ def render_auth_page() -> None:
                     2. **Enter your email address** (e.g. `you@gmail.com` or `you@outlook.com`).
                     3. **Enter your password** in the Password box.
                        *Using Gmail or Outlook with 2-Step Verification?* Open [Google Security](https://myaccount.google.com/security) or [Microsoft Security](https://account.live.com/proofs/Manage) to generate a quick sign-in password if your regular password is rejected.
-                    4. Click **Save Credentials to App** — Lumen will start sending real emails right away!
+                    4. Click **Send Verification Code & Test**, then enter the 6-digit code from your inbox to confirm your email is real and save!
                     """
                 )
 
@@ -1008,16 +1085,61 @@ def render_auth_page() -> None:
                 c_u, c_pw = st.columns(2)
                 smtp_u = c_u.text_input("Your Email", placeholder=email_ph, key="auth_smtp_u")
                 smtp_pw = c_pw.text_input("Password", type="password", placeholder="••••••••", key="auth_smtp_pw")
-                if st.button("Save Credentials to App", icon=":material/save:", key="auth_save_smtp", width="stretch"):
+
+                if st.button("📧 Send Verification Code & Test", type="primary", key="auth_send_smtp_test", width="stretch"):
                     if not smtp_h.strip() or not smtp_u.strip() or not smtp_pw.strip():
                         st.error("Please fill in your SMTP server, email, and password.")
                     else:
-                        db.set_setting("smtp_host", smtp_h.strip(), user_id=1)
-                        db.set_setting("smtp_port", str(smtp_p), user_id=1)
-                        db.set_setting("smtp_user", smtp_u.strip(), user_id=1)
-                        db.set_setting("smtp_pass", smtp_pw.strip(), user_id=1)
-                        db.set_setting("smtp_sender", smtp_u.strip(), user_id=1)
-                        st.success("Credentials saved! Emails will now send directly from your account.")
+                        clean_test_email = smtp_u.strip().lower()
+                        with st.spinner(f"Sending 6-digit verification code to {clean_test_email}..."):
+                            test_code = create_otp(clean_test_email, "smtp_verify", validity_minutes=10)
+                            ok_test, msg_test = send_smtp_verification_code(
+                                smtp_h.strip(), int(smtp_p), clean_test_email, smtp_pw.strip(), test_code
+                            )
+                        if ok_test:
+                            st.session_state["smtp_verify_pending"] = {
+                                "host": smtp_h.strip(),
+                                "port": str(int(smtp_p)),
+                                "email": clean_test_email,
+                                "pass": smtp_pw.strip(),
+                            }
+                            st.toast("Verification code sent! Check your inbox.", icon="📧")
+                            st.rerun()
+                        else:
+                            st.error(f"❌ {msg_test}")
+
+                pending_smtp = st.session_state.get("smtp_verify_pending")
+                if pending_smtp:
+                    st.info(
+                        f"📬 We sent a 6-digit verification code to **{pending_smtp['email']}**. "
+                        "Enter it below to prove the email is real and save your settings:"
+                    )
+                    c_vc, c_vb = st.columns([2, 1.4], vertical_alignment="bottom")
+                    smtp_code_in = c_vc.text_input(
+                        "6-Digit Verification Code",
+                        placeholder="123456",
+                        max_chars=6,
+                        key="auth_smtp_verify_code",
+                    )
+                    if c_vb.button("✅ Verify & Save", type="primary", key="auth_confirm_smtp_code", width="stretch"):
+                        entered = (smtp_code_in or "").strip()
+                        if not entered:
+                            st.error("Please enter the 6-digit code from your email.")
+                        elif verify_otp(pending_smtp["email"], "smtp_verify", entered):
+                            db.set_setting("smtp_host", pending_smtp["host"], user_id=1)
+                            db.set_setting("smtp_port", pending_smtp["port"], user_id=1)
+                            db.set_setting("smtp_user", pending_smtp["email"], user_id=1)
+                            db.set_setting("smtp_pass", pending_smtp["pass"], user_id=1)
+                            db.set_setting("smtp_sender", pending_smtp["email"], user_id=1)
+                            st.session_state.pop("smtp_verify_pending", None)
+                            st.success(f"🎉 Verified & saved! Real emails will now send from {pending_smtp['email']}.")
+                            st.toast("Email verified and connected!", icon="✅")
+                        else:
+                            st.error("❌ Invalid or expired code. Double-check your inbox or resend.")
+
+                    if st.button("Cancel Verification", key="auth_cancel_smtp_verify", width="stretch"):
+                        st.session_state.pop("smtp_verify_pending", None)
+                        st.rerun()
 
         # Tab 3: Forgot Password (GitHub-style 2-Step Flow)
         with tab_forgot:
