@@ -965,23 +965,59 @@ def render_auth_page() -> None:
                         st.rerun()
 
             with st.expander("⚙️ Connect Gmail or Outlook (Send Real Emails in 1-Click)"):
-                st.caption("Deliver emails directly through authenticated TLS (ports 587/465) without residential ISP port 25 restrictions. Configure credentials directly here without touching .env:")
+                st.markdown(
+                    """
+                    **Quick 4-Step Setup:**
+                    1. **Pick your email provider** below (Server & Port fill in automatically).
+                    2. **Enter your email address** (e.g. `you@gmail.com` or `you@outlook.com`).
+                    3. **Enter your password** in the Password box.
+                       *Using Gmail or Outlook with 2-Step Verification?* Open [Google Security](https://myaccount.google.com/security) or [Microsoft Security](https://account.live.com/proofs/Manage) to generate a quick sign-in password if your regular password is rejected.
+                    4. Click **Save Credentials to App** — Lumen will start sending real emails right away!
+                    """
+                )
+
+                _smtp_presets = {
+                    "Gmail": ("smtp.gmail.com", 587, "you@gmail.com"),
+                    "Outlook / Hotmail": ("smtp-mail.outlook.com", 587, "you@outlook.com"),
+                    "Yahoo": ("smtp.mail.yahoo.com", 587, "you@yahoo.com"),
+                    "Custom": ("", 587, "you@yourdomain.com"),
+                }
+
+                def _on_smtp_provider_change() -> None:
+                    prov = st.session_state.get("auth_smtp_provider", "Gmail")
+                    h, p, _ = _smtp_presets.get(prov, ("smtp.gmail.com", 587, "you@gmail.com"))
+                    st.session_state["auth_smtp_h"] = h
+                    st.session_state["auth_smtp_p"] = p
+
+                provider = st.radio(
+                    "Email Provider",
+                    list(_smtp_presets.keys()),
+                    horizontal=True,
+                    key="auth_smtp_provider",
+                    on_change=_on_smtp_provider_change,
+                )
+                default_host, default_port, email_ph = _smtp_presets[provider]
+                if "auth_smtp_h" not in st.session_state:
+                    st.session_state["auth_smtp_h"] = default_host
+                if "auth_smtp_p" not in st.session_state:
+                    st.session_state["auth_smtp_p"] = default_port
+
                 c_h, c_p = st.columns([2, 1])
-                smtp_h = c_h.text_input("SMTP Server Host", value="smtp.gmail.com", key="auth_smtp_h")
-                smtp_p = c_p.number_input("Port", value=587, min_value=1, max_value=65535, key="auth_smtp_p")
+                smtp_h = c_h.text_input("SMTP Server Host", key="auth_smtp_h", placeholder="e.g. smtp.gmail.com")
+                smtp_p = c_p.number_input("Port", min_value=1, max_value=65535, key="auth_smtp_p")
                 c_u, c_pw = st.columns(2)
-                smtp_u = c_u.text_input("Your Email", placeholder="you@gmail.com", key="auth_smtp_u")
-                smtp_pw = c_pw.text_input("App Password", type="password", placeholder="16-character app password", key="auth_smtp_pw", help="For Gmail, create an App Password at myaccount.google.com/apppasswords")
-                if st.button("Save Credentials to App", icon=":material/save:", key="auth_save_smtp"):
-                    if not smtp_u or not smtp_pw:
-                        st.error("Please enter both email and app password.")
+                smtp_u = c_u.text_input("Your Email", placeholder=email_ph, key="auth_smtp_u")
+                smtp_pw = c_pw.text_input("Password", type="password", placeholder="••••••••", key="auth_smtp_pw")
+                if st.button("Save Credentials to App", icon=":material/save:", key="auth_save_smtp", width="stretch"):
+                    if not smtp_h.strip() or not smtp_u.strip() or not smtp_pw.strip():
+                        st.error("Please fill in your SMTP server, email, and password.")
                     else:
                         db.set_setting("smtp_host", smtp_h.strip(), user_id=1)
                         db.set_setting("smtp_port", str(smtp_p), user_id=1)
                         db.set_setting("smtp_user", smtp_u.strip(), user_id=1)
                         db.set_setting("smtp_pass", smtp_pw.strip(), user_id=1)
                         db.set_setting("smtp_sender", smtp_u.strip(), user_id=1)
-                        st.success("Credentials saved to database! Emails will now send directly from your account.")
+                        st.success("Credentials saved! Emails will now send directly from your account.")
 
         # Tab 3: Forgot Password (GitHub-style 2-Step Flow)
         with tab_forgot:

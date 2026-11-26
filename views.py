@@ -2263,7 +2263,7 @@ def page_settings() -> None:
 
             col_u1, col_u2 = st.columns(2)
             s_user = col_u1.text_input("Username / Email", value=settings_now.get("smtp_user", ""), placeholder="e.g. you@gmail.com")
-            s_pass = col_u2.text_input("Password / App Password", type="password", value=settings_now.get("smtp_pass", ""), placeholder="••••••••••••")
+            s_pass = col_u2.text_input("Password", type="password", value=settings_now.get("smtp_pass", ""), placeholder="••••••••••••")
 
             col_m1, col_m2 = st.columns(2)
             s_sender = col_m1.text_input("Sender Display Email", value=settings_now.get("smtp_sender", ""), placeholder="e.g. lumen-reports@domain.com")
