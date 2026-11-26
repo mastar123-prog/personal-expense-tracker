@@ -11,6 +11,7 @@ import hashlib
 import os
 import secrets
 import smtplib
+import socket
 import sqlite3
 from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
@@ -364,6 +365,13 @@ def send_smtp_verification_code(
             False,
             "Sign-in was rejected by your email provider. Double-check your email & password "
             "(if you use 2-Step Verification on Gmail/Outlook, generate a sign-in password in your account security settings).",
+        )
+    except smtplib.SMTPServerDisconnected:
+        return (
+            False,
+            f"The mail server ({clean_host}:{port}) closed the connection during sign-in. "
+            "This usually means the provider blocked basic password login (try generating a sign-in password in your account security settings) "
+            "or try switching the port between 587 and 465.",
         )
     except (socket.gaierror, TimeoutError, OSError) as e:
         return False, f"Could not reach {clean_host}:{port} ({e}). Check the server host and port."
